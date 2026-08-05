@@ -28,6 +28,16 @@ async def main():
     bot = Bot(token=CUSTOMER_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     registry.set_customer_bot(bot)
 
+    # Bot username'i — to'lovdan keyin mijozni botga qaytarish havolasi uchun
+    # (https://t.me/<username>). Env'da BOT_CUSTOMER_USERNAME berilsa u ustun.
+    try:
+        me = await bot.get_me()
+        if me and me.username:
+            registry.set_customer_bot_username(me.username)
+            logger.info("ℹ️ Sotuv bot username: @%s", me.username)
+    except Exception as e:
+        logger.warning("Bot username'ini olib bo'lmadi: %s", e)
+
     dp = Dispatcher(storage=MemoryStorage())
     dp.message.middleware(DbSessionMiddleware())
     dp.callback_query.middleware(DbSessionMiddleware())

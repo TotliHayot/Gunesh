@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.config import MAX_BODY_BYTES
-from webapp.routes import catalog, config as config_route, images, orders
+from webapp.routes import catalog, config as config_route, images, orders, payments
 from webapp.security import rate_limited
 
 logging.basicConfig(
@@ -122,6 +122,10 @@ app.include_router(config_route.router, prefix="/api")
 app.include_router(catalog.router, prefix="/api")
 app.include_router(orders.router, prefix="/api")
 app.include_router(images.router, prefix="/api")
+
+# To'lov webhooki — ATAYLAB '/api' prefiksisiz. Provayder serveri Telegram
+# initData yubormaydi va rate-limitga tushmasligi kerak; himoya HMAC imzo orqali.
+app.include_router(payments.router)
 
 # Statik fayllar (Mini App)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

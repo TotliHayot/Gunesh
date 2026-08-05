@@ -113,12 +113,40 @@ NEW_INDEXES = [
     "CREATE INDEX IF NOT EXISTS ix_order_items_order ON order_items (order_id)",
     "CREATE INDEX IF NOT EXISTS ix_users_telegram ON users (telegram_id)",
     "CREATE INDEX IF NOT EXISTS ix_admin_roles_role ON admin_roles (role)",
+    "CREATE INDEX IF NOT EXISTS ix_payments_order_status ON payments (order_id, status)",
+]
+
+# Eski `payments` jadvaliga keyin qo'shilgan ustunlar (idempotent).
+PAYMENT_NEW_COLUMNS = [
+    ("pay_chat_id", "BIGINT"),
+    ("fiscal_done", "BOOLEAN DEFAULT FALSE"),
 ]
 
 # admin_roles jadvali `Base.metadata.create_all` orqali yaratiladi, LEKIN eski
 # DB'larda (yangi model kod deploydan oldin ishga tushirilgan) yoki har qanday
 # yumshoq holatda uni majburiy yaratib qo'yamiz — bu idempotent va xavfsiz.
 FORCE_TABLES = [
+    (
+        "payments",
+        """
+        CREATE TABLE IF NOT EXISTS payments (
+            id SERIAL PRIMARY KEY,
+            order_id INTEGER NOT NULL REFERENCES orders(id),
+            user_id BIGINT NOT NULL,
+            external_id VARCHAR(120) NOT NULL UNIQUE,
+            provider VARCHAR(24) DEFAULT 'paylov',
+            amount BIGINT DEFAULT 0,
+            provider_order_id VARCHAR(64),
+            payment_id VARCHAR(64),
+            status VARCHAR(16) DEFAULT 'pending',
+            fiscal_done BOOLEAN DEFAULT FALSE,
+            pay_message_id BIGINT,
+            pay_chat_id BIGINT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            paid_at TIMESTAMP
+        )
+        """,
+    ),
     (
         "admin_roles",
         """
@@ -201,6 +229,12 @@ async def _run_migrations(conn):
             await conn.execute(text(sql))
         except Exception as e:
             logger.warning("Backfill skip: %s", e)
+    # `payments` jadvaliga keyin qo'shilgan ustunlar.
+    for col, ddl in PAYMENT_NEW_COLUMNS:
+        try:
+            await conn.execute(text(f'ALTER TABLE payments ADD COLUMN IF NOT EXISTS {col} {ddl}'))
+        except Exception as e:
+            logger.warning("Migration skip payments.%s: %s", col, e)
     for ddl in NEW_INDEXES:
         try:
             await conn.execute(text(ddl))
@@ -227,6 +261,7 @@ async def create_tables():
         # Barcha modellarni import qilamiz — Base.metadata to'lishi uchun.
         from core.models import (  # noqa: F401
             setting, user, category, product, banner, order, media, admin_role,
+            payment,
         )
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)

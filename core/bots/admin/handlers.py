@@ -42,7 +42,7 @@ from core.services.i18n import STATUS_LABELS, t
 from core.services.order_service import OrderError
 from core.utils import esc, fmt_money, order_summary_text
 from core.bots.admin import keyboards as kb
-from core.bots.admin.states import CancelOrder, FindOrder
+from core.bots.admin.states import ActivatePayment, CancelOrder, FindOrder
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -113,10 +113,17 @@ HELP_TEXT = (
     "/orders — barcha buyurtmalar\n"
     "/order 1042 — raqam bo'yicha topish\n"
     "/stats — statistika\n"
+    "/tolov — onlayn to'lovni QO'LDA tasdiqlash\n"
     "/menu — asosiy menyu\n"
     "/cancel — joriy amalni bekor qilish\n\n"
     "<b>Ish tartibi</b>\n"
     "🆕 Yangi → ✅ Tasdiqlash → 👨‍🍳 Tayyorlash → 🚗 Yo'lda → 📍 Yetkazildi → 🎉 Yakunlash\n\n"
+    "<b>To'lov</b>\n"
+    "• Onlayn to'langan buyurtma to'lov <b>tasdiqlangandan keyin</b> shu botga "
+    "tushadi (to'lanmagan buyurtma ko'rinmaydi).\n"
+    "• Naqd (yetkazishda) tanlangan buyurtma darhol tushadi — pul yetkazishda olinadi.\n"
+    "• Pul tushgan, lekin buyurtma to'lanmagan bo'lib qolsa: «💳 To'lovni tasdiqlash» "
+    "yoki <code>/tolov #1042</code>.\n\n"
     "<b>Muhim</b>\n"
     "• Bekor qilish/rad etishda <b>sabab</b> so'raladi — u mijozga yuboriladi.\n"
     "• Onlayn to'langan buyurtma bekor qilinsa, mijozga pulni qaytarish uchun "
@@ -192,7 +199,10 @@ async def cmd_stats(message: Message, session: AsyncSession, state: FSMContext):
 #  kutish holatida bo'lsa ham menyu tugmasi ishlaydi (holat tozalanadi). Aks
 #  holda tugma matni "sabab" sifatida mijozga ketib qolardi.
 # ═════════════════════════════════════════════════════════════
-_MENU_TEXTS = {kb.BTN_NEW_ORDERS, kb.BTN_ALL_ORDERS, kb.BTN_STATS, kb.BTN_FIND, kb.BTN_HELP}
+_MENU_TEXTS = {
+    kb.BTN_NEW_ORDERS, kb.BTN_ALL_ORDERS, kb.BTN_STATS,
+    kb.BTN_FIND, kb.BTN_PAYMENT, kb.BTN_HELP,
+}
 
 
 @router.message(F.text.in_(_MENU_TEXTS))
@@ -202,6 +212,11 @@ async def menu_router(message: Message, session: AsyncSession, state: FSMContext
         # Qidiruv — FSM boshlanadi, shuning uchun state'ni handler o'zi qo'yadi.
         await state.clear()
         await _ask_order_number(message, state)
+        return
+    if text == kb.BTN_PAYMENT:
+        # To'lovni qo'lda tasdiqlash — bu ham FSM boshlaydi.
+        await state.clear()
+        await _ask_payment_ref(message, state)
         return
     await state.clear()
     if text == kb.BTN_NEW_ORDERS:
@@ -383,6 +398,104 @@ async def find_order_apply(message: Message, session: AsyncSession, state: FSMCo
         return
     await state.clear()
     await _send_order_by_number(message, session, int(digits))
+
+
+# ═════════════════════════════════════════════════════════════
+#  TO'LOVNI QO'LDA TASDIQLASH
+#
+#  Kerak bo'ladigan holatlar:
+#    • provayder komissiyasi sabab webhook summasi mos kelmadi (avtomatik
+#      tasdiqlanmaydi — bot adminga xabar beradi);
+#    • mijoz to'ladi, lekin webhook yetib kelmadi (tarmoq muammosi).
+#  Har ikki holatda admin to'lov ma'lumotini provayder kabinetida tekshirib,
+#  shu yerda tasdiqlaydi. Tasdiqlangach buyurtma to'langan bo'ladi va odatdagi
+#  bildirishnomalar yuboriladi.
+# ═════════════════════════════════════════════════════════════
+_PAYMENT_ASK = (
+    "💳 <b>To'lovni tasdiqlash</b>\n\n"
+    "Quyidagilardan birini yuboring:\n"
+    "• <code>external_id</code> (bot xabarida ko'rsatilgan)\n"
+    "• <code>payment_id</code> (provayder bergan)\n"
+    "• buyurtma raqami — masalan <code>#1042</code>\n\n"
+    "⚠️ Faqat pul <b>haqiqatan tushgan</b> bo'lsa tasdiqlang."
+)
+
+
+async def _ask_payment_ref(message: Message, state: FSMContext):
+    await state.set_state(ActivatePayment.ref)
+    await message.answer(_PAYMENT_ASK, reply_markup=kb.cancel_menu())
+
+
+async def _activate_payment(message: Message, session: AsyncSession, ref: str):
+    """Berilgan havola bo'yicha to'lovni topib tasdiqlaydi."""
+    from core.services import payment_service
+
+    payment = await payment_service.find_payment(session, ref)
+    if payment is None:
+        await message.answer(
+            "❌ Bunday to'lov topilmadi.\n\n"
+            "Buyurtma onlayn to'lov uchun ochilmagan bo'lishi mumkin "
+            "(mijoz to'lov usulini tanlamagan).",
+            reply_markup=kb.main_menu(),
+        )
+        return
+
+    order = await order_service.get_order(session, payment.order_id)
+    if order is None:
+        await message.answer("❌ To'lovga tegishli buyurtma topilmadi.", reply_markup=kb.main_menu())
+        return
+
+    if payment.status == "paid":
+        await message.answer(
+            f"ℹ️ Bu to'lov allaqachon tasdiqlangan.\n"
+            f"🧾 Buyurtma: <b>#{order.order_number}</b>",
+            reply_markup=kb.main_menu(),
+        )
+        return
+
+    currency = await _currency()
+    try:
+        ok = await payment_service.confirm_payment(session, payment, payment.payment_id)
+    except Exception as e:
+        logger.exception("To'lovni qo'lda tasdiqlashda xato (%s): %s", ref, e)
+        await message.answer(
+            f"❌ Tasdiqlab bo'lmadi: {esc(str(e))}", reply_markup=kb.main_menu()
+        )
+        return
+
+    if not ok:
+        await message.answer("ℹ️ To'lov holati o'zgarmadi.", reply_markup=kb.main_menu())
+        return
+
+    await message.answer(
+        "✅ <b>To'lov tasdiqlandi</b>\n\n"
+        f"🧾 Buyurtma: <b>#{order.order_number}</b>\n"
+        f"💰 Summa: <b>{fmt_money(payment.amount_som, currency)}</b>\n"
+        f"🏦 Usul: <b>{esc(payment_service.provider_label(payment.provider))}</b>\n"
+        f"👤 Mijoz: <code>{order.user_id}</code>\n\n"
+        "Mijozga xabar yuborildi.",
+        reply_markup=kb.main_menu(),
+    )
+
+
+@router.message(Command("tolov"))
+async def cmd_payment(message: Message, command: CommandObject, session: AsyncSession, state: FSMContext):
+    await state.clear()
+    ref = (command.args or "").strip()
+    if not ref:
+        await _ask_payment_ref(message, state)
+        return
+    await _activate_payment(message, session, ref)
+
+
+@router.message(ActivatePayment.ref, F.text)
+async def payment_ref_received(message: Message, session: AsyncSession, state: FSMContext):
+    ref = (message.text or "").strip()
+    if not ref:
+        await message.answer("❗️ external_id, payment_id yoki buyurtma raqamini yuboring:")
+        return
+    await state.clear()
+    await _activate_payment(message, session, ref)
 
 
 # ═════════════════════════════════════════════════════════════

@@ -9,7 +9,13 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from core.config import WEBAPP_URL
+from core.config import (
+    PAYLOV_ENABLED,
+    PAYLOV_PROVIDERS,
+    PAYMENT_ALLOW_CASH,
+    PAYMENT_TEST_MODE,
+    WEBAPP_URL,
+)
 from core.services.i18n import t
 
 
@@ -50,14 +56,17 @@ def language_inline() -> InlineKeyboardMarkup:
     ])
 
 
-# Onlayn to'lov provayderlari (hozircha tanlansa "to'landi" deb hisoblanadi;
-# keyinroq haqiqiy API integratsiyasi qo'shiladi).
-PAYMENT_PROVIDERS = [
-    ("click", "Click"),
-    ("payme", "Payme"),
-    ("uzum", "Uzum"),
-    ("paylov", "Paylov"),
-]
+# Onlayn to'lov provayderlari — ro'yxat env (PAYLOV_PROVIDERS) orqali boshqariladi.
+# Yorliqlar payment_service'da (PROVIDER_LABELS) saqlanadi, shu sabab ikki joyda
+# takrorlanmaydi.
+def online_payment_available() -> bool:
+    """Onlayn to'lov tugmalarini ko'rsatish mumkinmi.
+
+    Kalitlar sozlanmagan bo'lsa onlayn tugmalar KO'RSATILMAYDI — aks holda mijoz
+    bosadi va hech narsa bo'lmaydi (yoki eski sinov rejimida bepul o'tib ketadi).
+    Sinov uchun ataylab PAYMENT_TEST_MODE=true qo'yilsa ko'rsatiladi.
+    """
+    return PAYLOV_ENABLED or PAYMENT_TEST_MODE
 
 
 def pay_start(order_id: int, lang: str) -> InlineKeyboardMarkup:
@@ -68,19 +77,47 @@ def pay_start(order_id: int, lang: str) -> InlineKeyboardMarkup:
 
 
 def payment_providers(order_id: int, lang: str) -> InlineKeyboardMarkup:
-    """To'lov usulini tanlash: Click / Payme / Uzum / Paylov (onlayn) + Naqd (offline)."""
+    """To'lov usulini tanlash: Payme / Click / Uzum / Paylov (onlayn) + Naqd.
+
+    • Onlayn tugmalar faqat to'lov kalitlari sozlangan bo'lsa chiqadi.
+    • Naqd (yetkazishda) tugmasi PAYMENT_ALLOW_CASH bilan o'chirilishi mumkin.
+    """
+    from core.services.payment_service import provider_label
+
     rows: list[list[InlineKeyboardButton]] = []
-    row: list[InlineKeyboardButton] = []
-    for code, label in PAYMENT_PROVIDERS:
-        row.append(InlineKeyboardButton(text=f"💳 {label}", callback_data=f"paym:{code}:{order_id}"))
-        if len(row) == 2:
+    if online_payment_available():
+        row: list[InlineKeyboardButton] = []
+        for code in PAYLOV_PROVIDERS:
+            row.append(InlineKeyboardButton(
+                text=f"💳 {provider_label(code)}",
+                callback_data=f"paym:{code}:{order_id}",
+            ))
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
             rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    # Offline (naqd) — alohida, keng qatorda.
-    rows.append([InlineKeyboardButton(text=t("pay_offline", lang), callback_data=f"paym:offline:{order_id}")])
+    if PAYMENT_ALLOW_CASH:
+        # Offline (naqd) — alohida, keng qatorda.
+        rows.append([InlineKeyboardButton(
+            text=t("pay_offline", lang), callback_data=f"paym:offline:{order_id}"
+        )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def pay_link(checkout_url: str, provider_name: str, order_id: int, lang: str) -> InlineKeyboardMarkup:
+    """«To'lovga tayyor» xabari klaviaturasi.
+
+    • URL tugmasi — provayderning to'lov sahifasini ochadi.
+    • «To'lovni tekshirish» — webhook kechikkan bo'lsa mijoz o'zi holatni
+      yangilashi uchun (bazadagi holatni o'qiydi, pul harakatiga ta'sir qilmaydi).
+    • «Boshqa usul» — provayderni qayta tanlash.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t("btn_pay_via", lang, provider=provider_name), url=checkout_url)],
+        [InlineKeyboardButton(text=t("btn_check_payment", lang), callback_data=f"payck:{order_id}")],
+        [InlineKeyboardButton(text=t("btn_other_method", lang), callback_data=f"pay:{order_id}")],
+    ])
 
 
 def open_shop_inline(lang: str) -> InlineKeyboardMarkup | None:
