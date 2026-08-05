@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <!-- Yuza rangi. app.js dagi THEME_BG bilan va CSS --bg bilan BIR XIL bo'lishi shart. -->
+  <meta name="theme-color" content="#F5FBF9" />
+  <title>Organik do'kon</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/static/styles.css?v=25" />
+</head>
+<body>
+  <!-- Splash: animatsiyali brend belgisi (sut idishi + yaproq).
+       SVG bu yerda INLINE — splash JS ishga tushishidan oldin ko'rinishi kerak. -->
+  <div id="splash" class="splash">
+    <div class="splash-inner">
+      <div class="splash-logo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 2h6" />
+          <path d="M9.5 2v3.1a2 2 0 0 1-.38 1.17L7.6 8.5A3 3 0 0 0 7 10.3V19a3 3 0 0 0 3 3h4a3 3 0 0 0 3-3v-8.7a3 3 0 0 0-.6-1.8l-1.52-2.23A2 2 0 0 1 14.5 5.1V2" />
+          <path d="M7.1 12.5h9.8" />
+          <path d="M12 19.6c-1.9 0-3-1.4-2.6-3.2 1.5.2 2.4 1.1 2.6 3.2Z" />
+        </svg>
+      </div>
+      <div class="spinner"></div>
+    </div>
+  </div>
+
+  <main id="app">
+    <!-- ═══ HOME ═══ -->
+    <section id="view-home" class="view active">
+      <header class="topbar">
+        <div class="tb-brand">
+          <div class="tb-logo" id="shopLogo"></div>
+          <div class="tb-text">
+            <!-- Brend shiori: "Fermadan uyingizgacha" — organik + yetkazib berish
+                 ma'nosini birga beradi ("Onlayn do'kon" o'rniga). -->
+            <span class="tb-eyebrow">
+              <span data-ic="leaf"></span>
+              <span id="shopStatus" data-i18n="brand_tagline">Fermadan uyingizgacha</span>
+            </span>
+            <b class="tb-name" id="shopName">Do'kon</b>
+          </div>
+        </div>
+        <!-- Sevimlilar. Savat pastdagi navigatsiyada bo'lgani uchun bu yerda
+             takrorlanmaydi — o'rniga eng foydali yorliq: sevimlilar ro'yxati. -->
+        <button class="tb-icon" id="tbFav" aria-label="Sevimlilar" data-i18n-aria="favorites_title">
+          <span data-ic="heart"></span>
+          <b id="favBadge" class="badge" hidden>0</b>
+        </button>
+      </header>
+
+      <div class="home-scroll">
+        <div class="searchbar">
+          <span data-ic="search" class="sb-ic"></span>
+          <input type="text" id="searchInput" placeholder="Mahsulot qidirish…" data-i18n-ph="search" autocomplete="off" aria-label="Qidirish" />
+          <button class="sb-clear" id="searchClear" hidden aria-label="Tozalash"><span data-ic="x"></span></button>
+        </div>
+
+        <div id="closedBanner" class="notice" hidden>
+          <span data-ic="clock"></span><span>Do'kon hozircha yopiq</span>
+        </div>
+
+        <div id="banners" class="banners"></div>
+        <div id="bannerDots" class="banner-dots" hidden></div>
+
+        <div id="catWrap" class="cat-wrap">
+          <div id="categories" class="cat-strip"></div>
+        </div>
+
+        <div id="sortbar" class="sortbar"></div>
+
+        <div class="section-head">
+          <h2 class="section-title" id="productsTitle">Mahsulotlar</h2>
+          <span class="section-count" id="productsCount" hidden></span>
+        </div>
+
+        <div id="products" class="grid"></div>
+        <div id="emptyProducts" class="empty" hidden>
+          <div class="empty-ic"><span data-ic="package"></span></div>
+          <p data-i18n="no_products">Mahsulot topilmadi</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ CART ═══ -->
+    <section id="view-cart" class="view">
+      <header class="page-head">
+        <h1 data-i18n="cart_title">Savat</h1>
+        <p class="page-sub" id="cartSub" hidden></p>
+      </header>
+      <div id="cartItems" class="cart-items"></div>
+      <div id="cartEmpty" class="empty" hidden>
+        <div class="empty-ic"><span data-ic="cart"></span></div>
+        <p data-i18n="cart_empty">Savat bo'sh</p>
+        <button class="btn btn-ghost" id="emptyGoShop" data-i18n="start_shopping">Xaridni boshlash</button>
+      </div>
+      <div id="cartFooter" class="cart-footer"></div>
+    </section>
+
+    <!-- ═══ FAVORITES ═══ -->
+    <section id="view-favorites" class="view">
+      <!-- Sevimlilar pastdagi navigatsiyada yo'q, shuning uchun bu sahifada
+           orqaga qaytish tugmasi MAJBURIY (aks holda faqat «Asosiy» orqali
+           chiqish mumkin bo'lardi). -->
+      <header class="page-head with-back">
+        <button class="head-back" id="favBack" aria-label="Orqaga"><span data-ic="arrowLeft"></span></button>
+        <div class="head-text">
+          <h1 data-i18n="favorites_title">Sevimlilar</h1>
+          <p class="page-sub" data-i18n="favorites_sub">Yurakcha bosilgan mahsulotlar</p>
+        </div>
+      </header>
+      <div class="home-scroll">
+        <div id="favProducts" class="grid"></div>
+        <div id="emptyFav" class="empty" hidden>
+          <div class="empty-ic"><span data-ic="heart"></span></div>
+          <p data-i18n="no_favorites">Sevimlilar hali bo'sh</p>
+          <button class="btn btn-ghost" id="favGoShop" data-i18n="start_shopping">Xaridni boshlash</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ ORDERS ═══ -->
+    <section id="view-orders" class="view">
+      <header class="page-head"><h1 data-i18n="orders_title">Buyurtmalarim</h1></header>
+      <div id="ordersList" class="orders-list"></div>
+      <div id="emptyOrders" class="empty" hidden>
+        <div class="empty-ic"><span data-ic="receipt"></span></div>
+        <p data-i18n="no_orders">Sizda hali buyurtmalar yo'q</p>
+      </div>
+    </section>
+
+    <!-- ═══ PROFILE ═══ -->
+    <section id="view-profile" class="view">
+      <header class="page-head"><h1 data-i18n="profile_title">Profil</h1></header>
+      <div id="profileContent"></div>
+    </section>
+  </main>
+
+  <!-- Product sheet -->
+  <div id="sheetProduct" class="sheet">
+    <div class="sheet-backdrop" data-close></div>
+    <div class="sheet-card"><div class="sheet-handle"></div><div id="productContent"></div></div>
+  </div>
+
+  <!-- Checkout sheet -->
+  <div id="sheetCheckout" class="sheet">
+    <div class="sheet-backdrop" data-close></div>
+    <div class="sheet-card tall">
+      <div class="sheet-handle"></div>
+      <h2 class="sheet-title" data-i18n="checkout_title">Buyurtmani rasmiylashtirish</h2>
+      <div id="checkoutContent"></div>
+    </div>
+  </div>
+
+  <!-- Suzuvchi savat paneli (bosh sahifada, savat bo'sh bo'lmasa) -->
+  <button id="fabCart" class="fab-cart" type="button">
+    <span class="fc-ic"><span data-ic="cart"></span><b class="fc-count" id="fabCount">0</b></span>
+    <span class="fc-text">
+      <span class="fc-label" data-i18n="in_cart">Savatda</span>
+      <span class="fc-total" id="fabTotal">0</span>
+    </span>
+    <span class="fc-go"><span data-i18n="view_cart">Ko'rish</span><span data-ic="arrowRight"></span></span>
+  </button>
+
+  <!-- Bottom nav -->
+  <nav class="bottom-nav">
+    <button class="nav-item active" data-nav="home"><span data-ic="home"></span><small data-i18n="nav_home">Asosiy</small></button>
+    <button class="nav-item" data-nav="cart"><span data-ic="cart"></span><small data-i18n="nav_cart">Savat</small><b id="navCartBadge" class="badge" hidden>0</b></button>
+    <button class="nav-item" data-nav="orders"><span data-ic="receipt"></span><small data-i18n="nav_orders">Buyurtmalar</small></button>
+    <button class="nav-item" data-nav="profile"><span data-ic="user"></span><small data-i18n="nav_profile">Profil</small></button>
+  </nav>
+
+  <div id="toast" class="toast"></div>
+  <script src="/static/app.js?v=25"></script>
+</body>
+</html>

@@ -1,0 +1,2066 @@
+"""
+Super Admin bot handlerlari.
+
+Super Admin do'konni har biznesga moslaydi (nom, salom xabari/rasmi, valyuta,
+narxlar), KATALOGni boshqaradi, buyurtmalarni kuzatadi, marketing (banner +
+ommaviy xabar) qiladi va jamoani (admin/superadmin) boshqaradi.
+
+ESKI VERSIYADAGI NOQULAYLIKLAR VA ULARNING YECHIMI:
+  1. Faqat /start buyrug'i bor edi  →  /menu /help /cancel /products /orders
+     /settings /analytics /broadcast qo'shildi.
+  2. Inline klaviaturalarda «Orqaga» yo'q edi  →  HAR BIR klaviaturada
+     «⬅️ Orqaga» va «✖️ Yopish» bor (kb.back_row()).
+  3. Mahsulotlar ro'yxati har mahsulot uchun ALOHIDA xabar yuborardi (chat
+     to'lardi, 40 tada tugardi)  →  bitta xabarda SAHIFALANGAN ro'yxat, kategoriya
+     filtri va nom bo'yicha qidiruv.
+  4. Mahsulotda faqat narx/qoldiq tahrirlanardi  →  nom, tavsif, narx, eski narx
+     (chegirma), qoldiq, rasm, kategoriya, tartib, faollik.
+  5. Kategoriyalar faqat KO'RINARDI  →  nom/emoji tahrirlash, tartib almashtirish,
+     faol/nofaol, o'chirish (tasdiq bilan).
+  6. Mahsulot o'chirish tasdiqsiz edi  →  tasdiq so'raladi (rol o'chirish kabi).
+  7. Admin qo'shish faqat raqamli ID bilan  →  kontakt ulashish, xabarni forward
+     qilish, @username yoki ID — to'rt usul.
+  8. Bannerlarni faqat DB'dan qo'shish mumkin edi  →  botdan boshqarish.
+  9. Ish vaqti tekshirilmasdan saqlanardi  →  validatsiya (aks holda do'kon
+     kutilmaganda 24/7 ochiq bo'lib qolardi).
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from html import escape
+
+from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import BaseFilter, Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from core.config import WEBAPP_URL
+from core.services import (
+    admin_service,
+    catalog_service,
+    media_service,
+    notify_service,
+    order_service,
+    settings_service,
+    user_service,
+)
+from core.services.i18n import STATUS_LABELS
+from core.utils import fmt_money, order_summary_text, yandex_maps_link
+from core.bots.superadmin import keyboards as kb
+from core.bots.superadmin.states import (
+    AddAdminRole,
+    AddBanner,
+    AddCategory,
+    AddProduct,
+    Broadcast,
+    EditCategory,
+    EditProduct,
+    EditSetting,
+    ProductSearch,
+    ShopLocation,
+)
+
+logger = logging.getLogger(__name__)
+router = Router()
+
+
+class IsSuperAdmin(BaseFilter):
+    async def __call__(self, event) -> bool:
+        user = getattr(event, "from_user", None)
+        if not user:
+            return False
+        # Env doim tekshiriladi (root doim ochiq). DB rollarini keshdan olamiz —
+        # ensure_loaded TTL bilan yangilaydi (yangi superadmin darhol ta'sir qiladi).
+        await admin_service.ensure_loaded()
+        return admin_service.is_superadmin_sync(user.id)
+
+
+router.message.filter(IsSuperAdmin())
+router.callback_query.filter(IsSuperAdmin())
+
+
+# ═════════════════════════════════════════════════════════════
+#  UMUMIY YORDAMCHILAR
+# ═════════════════════════════════════════════════════════════
+def esc(value) -> str:
+    """HTML parse_mode uchun xavfsiz matn.
+
+    Mahsulot nomi/tavsifida `<`, `&` bo'lsa Telegram xabarni rad etadi — shu
+    sabab foydalanuvchi kiritgan HAR QANDAY matn escape qilinadi.
+    """
+    return escape(str(value if value is not None else ""), quote=False)
+
+
+async def _currency() -> str:
+    return await settings_service.get("currency", "so'm")
+
+
+def _pages(total: int, size: int = kb.PAGE_SIZE) -> int:
+    return max(1, (total + size - 1) // size)
+
+
+def _clamp_page(page: int, pages: int) -> int:
+    return max(1, min(page, pages))
+
+
+async def _edit(callback: CallbackQuery, text: str, markup=None) -> None:
+    """Xabarni JOYIDA tahrirlaydi (yangi xabar yubormaydi — chat toza qoladi).
+
+    Tahrirlash imkonsiz bo'lsa (masalan xabar rasmli yoki juda eski) — yangi
+    xabar yuboriladi. «not modified» xatosi esa jimgina o'tkazib yuboriladi.
+    """
+    try:
+        await callback.message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
+    except TelegramBadRequest as e:
+        if "not modified" in str(e).lower():
+            return
+        try:
+            await callback.message.answer(text, reply_markup=markup, disable_web_page_preview=True)
+        except Exception as err:  # pragma: no cover — Telegram tomonidagi nosozlik
+            logger.warning("Xabarni yangilab bo'lmadi: %s", err)
+
+
+# Mahsulot ro'yxati filtri (foydalanuvchi bo'yicha). Barcha botlar bitta
+# jarayonda ishlaydi, shuning uchun xotiradagi dict yetarli. FSM ma'lumotida
+# saqlamaymiz — chunki har `state.clear()` filtrni ham o'chirib yuborardi.
+_plist_filter: dict[int, dict] = {}
+
+
+def _pf(user_id: int) -> dict:
+    return _plist_filter.setdefault(user_id, {"category_id": None, "query": None})
+
+
+def _has_filter(user_id: int) -> bool:
+    f = _pf(user_id)
+    return bool(f["category_id"] or f["query"])
+
+
+HELP_TEXT = (
+    "🆘 <b>Super Admin qo'llanmasi</b>\n\n"
+    "<b>Buyruqlar</b>\n"
+    "/menu — asosiy menyuni ko'rsatish\n"
+    "/products — mahsulotlar ro'yxati\n"
+    "/orders — buyurtmalar\n"
+    "/settings — do'kon sozlamalari\n"
+    "/analytics — analitika\n"
+    "/broadcast — mijozlarga ommaviy xabar\n"
+    "/status — tizim holati\n"
+    "/cancel — joriy amalni bekor qilish\n\n"
+    "<b>Bo'limlar</b>\n"
+    f"📦 <b>{kb.BTN_CATALOG}</b> — mahsulot va kategoriyalar (qo'shish, tahrirlash, "
+    "tartiblash, o'chirish).\n"
+    f"🧾 <b>{kb.BTN_ORDERS}</b> — buyurtmalarni holat bo'yicha kuzatish.\n"
+    f"📣 <b>{kb.BTN_MARKETING}</b> — bosh ekran bannerlari va ommaviy xabar.\n"
+    f"⚙️ <b>{kb.BTN_SETTINGS}</b> — nom, logo, valyuta, narxlar, ish vaqti, manzil.\n"
+    f"📊 <b>{kb.BTN_ANALYTICS}</b> — tushum, buyurtmalar, eng ko'p sotilganlar.\n"
+    f"🏪 <b>{kb.BTN_SHOP_STATUS}</b> — do'konni vaqtincha yopish/ochish.\n"
+    f"👥 <b>{kb.BTN_TEAM}</b> — admin va superadminlarni boshqarish.\n\n"
+    "💡 <i>Har qanday oynada «⬅️ Orqaga» yoki «✖️ Yopish» bor. FSM (savol-javob) "
+    "ichida esa «❌ Bekor qilish» yoki /cancel ishlatiladi.</i>"
+)
+
+
+# ═════════════════════════════════════════════════════════════
+#  BUYRUQLAR
+# ═════════════════════════════════════════════════════════════
+@router.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
+    # Kesh birinchi kirishda tayyor bo'lsin — filterlar darhol DB rollarini ko'rsin.
+    await admin_service.ensure_loaded()
+    shop = await settings_service.get("shop_name", "Do'kon")
+    is_open = await settings_service.is_shop_open()
+    await message.answer(
+        f"👑 <b>Super Admin panel</b>\n"
+        f"🏪 {esc(shop)} — {'🟢 ochiq' if is_open else '🔴 yopiq'}\n\n"
+        "Do'koningizni to'liq shu yerdan boshqarasiz: katalog, buyurtmalar, "
+        "marketing, sozlamalar va jamoa.\n\n"
+        "💡 Qo'llanma uchun /help",
+        reply_markup=kb.main_menu(),
+    )
+
+
+@router.message(Command("menu"))
+async def cmd_menu(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("🏠 Asosiy menyu", reply_markup=kb.main_menu())
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message):
+    await message.answer(HELP_TEXT, reply_markup=kb.main_menu())
+
+
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Bekor qilindi.", reply_markup=kb.main_menu())
+
+
+# Bekor qilish tugmasi — har qanday FSM holatdan chiqaradi (eng yuqori ustuvorlik).
+@router.message(F.text == kb.BTN_CANCEL)
+async def cancel_button(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Bekor qilindi.", reply_markup=kb.main_menu())
+
+
+@router.message(Command("products"))
+async def cmd_products(message: Message, session: AsyncSession, state: FSMContext):
+    await state.clear()
+    await _open_products(message, session)
+
+
+@router.message(Command("orders"))
+async def cmd_orders(message: Message, session: AsyncSession, state: FSMContext):
+    await state.clear()
+    await _open_orders(message, session)
+
+
+@router.message(Command("settings"))
+async def cmd_settings(message: Message, state: FSMContext):
+    await state.clear()
+    await _open_settings(message)
+
+
+@router.message(Command("analytics"))
+async def cmd_analytics(message: Message, session: AsyncSession, state: FSMContext):
+    await state.clear()
+    await _open_analytics(message, session)
+
+
+@router.message(Command("status"))
+async def cmd_status(message: Message, state: FSMContext):
+    await state.clear()
+    await _open_system(message)
+
+
+@router.message(Command("broadcast"))
+async def cmd_broadcast(message: Message, state: FSMContext, session: AsyncSession):
+    await state.clear()
+    await _open_broadcast(message, state, session)
+
+
+# ═════════════════════════════════════════════════════════════
+#  REPLY MENYU — BITTA marshrutlovchi
+#
+#  MUHIM: bu handler FSM holat handlerlaridan OLDIN registratsiya qilinadi va
+#  hech qanday state filtri yo'q. Shu tufayli foydalanuvchi savol-javob (FSM)
+#  o'rtasida bo'lsa ham menyu tugmasini bosishi kifoya — holat tozalanadi va
+#  kerakli bo'lim ochiladi. Aks holda "⚙️ Sozlamalar" matni mahsulot NOMI
+#  sifatida saqlanib ketardi (eski versiyadagi tuzoq).
+# ═════════════════════════════════════════════════════════════
+_MENU_TEXTS = {
+    kb.BTN_CATALOG, kb.BTN_ORDERS, kb.BTN_MARKETING, kb.BTN_SETTINGS,
+    kb.BTN_ANALYTICS, kb.BTN_SHOP_STATUS, kb.BTN_TEAM, kb.BTN_SYSTEM,
+}
+
+
+@router.message(F.text.in_(_MENU_TEXTS))
+async def menu_router(message: Message, session: AsyncSession, state: FSMContext):
+    await state.clear()
+    text = message.text
+    if text == kb.BTN_CATALOG:
+        await _open_catalog(message, session)
+    elif text == kb.BTN_ORDERS:
+        await _open_orders(message, session)
+    elif text == kb.BTN_MARKETING:
+        await _open_marketing(message, session)
+    elif text == kb.BTN_SETTINGS:
+        await _open_settings(message)
+    elif text == kb.BTN_ANALYTICS:
+        await _open_analytics(message, session)
+    elif text == kb.BTN_SHOP_STATUS:
+        await _open_shop_status(message)
+    elif text == kb.BTN_TEAM:
+        await _open_team(message)
+    elif text == kb.BTN_SYSTEM:
+        await _open_system(message)
+
+
+# ═════════════════════════════════════════════════════════════
+#  NAVIGATSIYA (yopish / bo'sh bosish)
+# ═════════════════════════════════════════════════════════════
+@router.callback_query(F.data == "nav:close")
+async def nav_close(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try:
+        await callback.message.delete()
+    except Exception:
+        await _edit(callback, "✖️ Yopildi.")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "nav:noop")
+async def nav_noop(callback: CallbackQuery):
+    # Sahifalash chegarasidagi «·» tugmalari — hech qanday amal bajarmaydi.
+    await callback.answer()
+
+
+# ═════════════════════════════════════════════════════════════
+#  KATALOG (menyu)
+# ═════════════════════════════════════════════════════════════
+async def _catalog_text(session: AsyncSession) -> str:
+    total = await catalog_service.count_products(session, only_active=False)
+    active = await catalog_service.count_active_products(session)
+    out = await catalog_service.count_out_of_stock(session)
+    cats = await catalog_service.count_categories(session)
+    lines = [
+        "📦 <b>Katalog</b>\n",
+        f"• Mahsulotlar: <b>{total}</b> (faol: {active})",
+        f"• Kategoriyalar: <b>{cats}</b>",
+    ]
+    if out:
+        lines.append(f"• ⚠️ Qoldig'i tugagan: <b>{out}</b> ta")
+    lines.append("\nAmalni tanlang:")
+    return "\n".join(lines)
+
+
+async def _open_catalog(message: Message, session: AsyncSession):
+    products = await catalog_service.count_products(session, only_active=False)
+    cats = await catalog_service.count_categories(session)
+    await message.answer(await _catalog_text(session), reply_markup=kb.catalog_menu(products, cats))
+
+
+@router.callback_query(F.data == "cat:menu")
+async def catalog_menu_cb(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    await state.clear()
+    products = await catalog_service.count_products(session, only_active=False)
+    cats = await catalog_service.count_categories(session)
+    await _edit(callback, await _catalog_text(session), kb.catalog_menu(products, cats))
+    await callback.answer()
+
+
+# ═════════════════════════════════════════════════════════════
+#  MAHSULOTLAR RO'YXATI (sahifalangan, bitta xabarda)
+# ═════════════════════════════════════════════════════════════
+async def _products_page(session: AsyncSession, user_id: int, page: int):
+    """Ro'yxat matni + klaviaturasini tayyorlaydi (filtrni hisobga olib)."""
+    f = _pf(user_id)
+    total = await catalog_service.count_products(
+        session, category_id=f["category_id"], query=f["query"], only_active=False
+    )
+    pages = _pages(total)
+    page = _clamp_page(page, pages)
+    products = await catalog_service.list_products(
+        session,
+        category_id=f["category_id"],
+        query=f["query"],
+        only_active=False,
+        sort="new",
+        limit=kb.PAGE_SIZE,
+        offset=(page - 1) * kb.PAGE_SIZE,
+    )
+    currency = await _currency()
+
+    head = ["📦 <b>Mahsulotlar</b>"]
+    if f["category_id"]:
+        cat = await catalog_service.get_category(session, f["category_id"])
+        head.append(f"🗂 Filtr: {esc(cat.name) if cat else '—'}")
+    if f["query"]:
+        head.append(f"🔎 Qidiruv: «{esc(f['query'])}»")
+    head.append(f"Jami: <b>{total}</b> ta · sahifa {page}/{pages}\n")
+
+    if not products:
+        head.append("<i>Bu shartlarga mos mahsulot topilmadi.</i>")
+    else:
+        for i, p in enumerate(products, start=(page - 1) * kb.PAGE_SIZE + 1):
+            flag = "🟢" if (p.is_active and p.deleted_at is None) else "🔴"
+            warn = " ⚠️" if p.stock <= 0 else ""
+            head.append(
+                f"{i}. {flag} <b>{esc(p.name)}</b>\n"
+                f"    💰 {fmt_money(p.price, currency)} · 📦 {p.stock} dona{warn}"
+            )
+        head.append("\n<i>Tahrirlash uchun mahsulot nomini bosing.</i>")
+
+    return "\n".join(head), kb.products_page_kb(products, page, pages, _has_filter(user_id))
+
+
+async def _open_products(message: Message, session: AsyncSession):
+    text, markup = await _products_page(session, message.from_user.id, 1)
+    await message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(F.data.startswith("pl:"))
+async def products_list(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    await state.clear()
+    page = int(callback.data.split(":")[1])
+    text, markup = await _products_page(session, callback.from_user.id, page)
+    await _edit(callback, text, markup)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "pflt")
+async def products_filter_menu(callback: CallbackQuery, session: AsyncSession):
+    cats = await catalog_service.list_categories(session, only_active=False)
+    await _edit(
+        callback,
+        "🔍 <b>Filtr va qidiruv</b>\n\n"
+        "Kategoriya tanlang yoki mahsulot nomi bo'yicha qidiring.",
+        kb.product_filter_kb(cats, _has_filter(callback.from_user.id)),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("pfc:"))
+async def products_filter_category(callback: CallbackQuery, session: AsyncSession):
+    cat_id = int(callback.data.split(":")[1])
+    _pf(callback.from_user.id)["category_id"] = cat_id or None
+    text, markup = await _products_page(session, callback.from_user.id, 1)
+    await _edit(callback, text, markup)
+    await callback.answer("Filtr qo'llandi" if cat_id else "Barcha kategoriyalar")
+
+
+@router.callback_query(F.data == "pfclr")
+async def products_filter_clear(callback: CallbackQuery, session: AsyncSession):
+    _plist_filter[callback.from_user.id] = {"category_id": None, "query": None}
+    text, markup = await _products_page(session, callback.from_user.id, 1)
+    await _edit(callback, text, markup)
+    await callback.answer("🧹 Filtr tozalandi")
+
+
+@router.callback_query(F.data == "psrch")
+async def products_search_prompt(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(ProductSearch.query)
+    await callback.message.answer(
+        "🔎 Mahsulot nomining bir qismini yuboring (masalan: <code>sut</code>):",
+        reply_markup=kb.cancel_menu(),
+    )
+    await callback.answer()
+
+
+@router.message(ProductSearch.query, F.text)
+async def products_search_apply(message: Message, session: AsyncSession, state: FSMContext):
+    _pf(message.from_user.id)["query"] = message.text.strip()[:60]
+    await state.clear()
+    text, markup = await _products_page(session, message.from_user.id, 1)
+    await message.answer("🔎 Qidiruv qo'llandi.", reply_markup=kb.main_menu())
+    await message.answer(text, reply_markup=markup)
+
+
+# ═════════════════════════════════════════════════════════════
+#  MAHSULOT KARTASI VA TAHRIRLASH
+# ═════════════════════════════════════════════════════════════
+async def _product_card(session: AsyncSession, product, page: int) -> tuple[str, object]:
+    currency = await _currency()
+    cat_name = "—"
+    if product.category_id:
+        cat = await catalog_service.get_category(session, product.category_id)
+        if cat:
+            cat_name = f"{cat.emoji} {esc(cat.name)}"
+
+    if product.old_price and product.old_price > product.price:
+        disc = round((1 - product.price / product.old_price) * 100)
+        price_line = (
+            f"💰 <b>{fmt_money(product.price, currency)}</b>  "
+            f"<s>{fmt_money(product.old_price, currency)}</s>  (−{disc}%)"
+        )
+    else:
+        price_line = f"💰 <b>{fmt_money(product.price, currency)}</b>"
+
+    active = product.is_active and product.deleted_at is None
+    tr_ru = "✅" if (product.name_ru or "").strip() else "➖"
+    tr_en = "✅" if (product.name_en or "").strip() else "➖"
+    lines = [
+        f"{'🟢' if active else '🔴'} <b>{esc(product.name)}</b>\n",
+        price_line,
+        f"📦 Qoldiq: <b>{product.stock}</b> dona" + ("  ⚠️ TUGAGAN" if product.stock <= 0 else ""),
+        f"🗂 Kategoriya: {cat_name}",
+        f"🖼 Rasm: {'✅ bor' if product.image_media_id else '🚫 yo‘q'}",
+        f"🌐 Tarjima: 🇷🇺 {tr_ru} · 🇬🇧 {tr_en}",
+        f"🔢 Tartib: {product.sort_order}",
+    ]
+    if product.description:
+        text = product.description if len(product.description) <= 400 else product.description[:400] + "…"
+        lines += ["", f"📝 {esc(text)}"]
+    lines += ["", f"🆔 <code>{product.id}</code>"]
+    return "\n".join(lines), kb.product_card_kb(product, page)
+
+
+@router.callback_query(F.data.startswith("pv:"))
+async def product_view(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    await state.clear()
+    _, pid, page = callback.data.split(":")
+    product = await catalog_service.get_product(session, int(pid))
+    if not product:
+        await callback.answer("Mahsulot topilmadi.", show_alert=True)
+        return
+    text, markup = await _product_card(session, product, int(page))
+    await _edit(callback, text, markup)
+    await callback.answer()
+
+
+# Maydon -> (so'rov matni, klaviatura turi). "clear" = bo'shatish mumkin.
+_PRODUCT_FIELD_PROMPTS = {
+    "name": ("✏️ Yangi <b>nom</b>ni yuboring (o'zbekcha — asosiy):", "cancel"),
+    "desc": ("📝 Yangi <b>tavsif</b>ni yuboring (mijoz mahsulot sahifasida ko'radi):", "clear"),
+    "name_ru": ("🇷🇺 Mahsulot nomini <b>rus tilida</b> yuboring:", "clear"),
+    "name_en": ("🇬🇧 Mahsulot nomini <b>ingliz tilida</b> yuboring:", "clear"),
+    "desc_ru": ("🇷🇺 Mahsulot tavsifini <b>rus tilida</b> yuboring:", "clear"),
+    "desc_en": ("🇬🇧 Mahsulot tavsifini <b>ingliz tilida</b> yuboring:", "clear"),
+    "price": ("💰 Yangi <b>narx</b>ni raqamda yuboring:", "cancel"),
+    "oldprice": (
+        "🏷 <b>Eski narx</b>ni raqamda yuboring — mijozga chegirma sifatida "
+        "ko'rsatiladi (joriy narxdan katta bo'lishi kerak):",
+        "clear",
+    ),
+    "stock": ("📦 Yangi <b>qoldiq</b>ni raqamda yuboring:", "cancel"),
+    "sort": ("🔢 <b>Tartib raqami</b>ni yuboring (kichik raqam — yuqorida turadi):", "cancel"),
+    "photo": ("🖼 Yangi <b>rasm</b>ni yuboring:", "clear"),
+}
+
+
+@router.callback_query(F.data.startswith("pe:"))
+async def product_edit_prompt(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    _, field, pid, page = callback.data.split(":")
+    product = await catalog_service.get_product(session, int(pid))
+    if not product:
+        await callback.answer("Mahsulot topilmadi.", show_alert=True)
+        return
+    prompt, kb_kind = _PRODUCT_FIELD_PROMPTS.get(field, ("Yangi qiymatni yuboring:", "cancel"))
+    await state.set_state(EditProduct.value)
+    await state.update_data(field=field, product_id=product.id, page=int(page))
+    markup = kb.clear_menu() if kb_kind == "clear" else kb.cancel_menu()
+    await callback.message.answer(f"<b>{esc(product.name)}</b>\n\n{prompt}", reply_markup=markup)
+    await callback.answer()
+
+
+async def _finish_product_edit(message: Message, session: AsyncSession, state: FSMContext, note: str):
+    """Tahrirdan keyin: FSM tozalanadi va YANGILANGAN karta qayta ko'rsatiladi."""
+    data = await state.get_data()
+    pid, page = int(data.get("product_id", 0)), int(data.get("page", 1))
+    await state.clear()
+    product = await catalog_service.get_product(session, pid)
+    if not product:
+        await message.answer("Mahsulot topilmadi.", reply_markup=kb.main_menu())
+        return
+    await message.answer(f"✅ {note}", reply_markup=kb.main_menu())
+    text, markup = await _product_card(session, product, page)
+    await message.answer(text, reply_markup=markup)
+
+
+@router.message(EditProduct.value, F.photo)
+async def product_edit_photo(message: Message, session: AsyncSession, state: FSMContext):
+    data = await state.get_data()
+    if data.get("field") != "photo":
+        await message.answer("❗️ Bu maydon uchun rasm emas, matn kiriting.")
+        return
+    # Rasm baytlari DB'ga (Media) saqlanadi — Mini App /api/image/<id> orqali oladi.
+    media = await media_service.save_from_telegram(session, message.bot, message.photo[-1].file_id)
+    if not media:
+        await message.answer("❗️ Rasmni saqlab bo'lmadi, qayta urinib ko'ring.")
+        return
+    await catalog_service.update_product(session, int(data["product_id"]), image_media_id=media.id)
+    await _finish_product_edit(message, session, state, "Rasm yangilandi.")
+
+
+@router.message(EditProduct.value, F.text)
+async def product_edit_value(message: Message, session: AsyncSession, state: FSMContext):
+    data = await state.get_data()
+    field = data.get("field")
+    pid = int(data.get("product_id", 0))
+    raw = (message.text or "").strip()
+    cleared = raw == kb.BTN_CLEAR
+
+    product = await catalog_service.get_product(session, pid)
+    if not product:
+        await state.clear()
+        await message.answer("Mahsulot topilmadi.", reply_markup=kb.main_menu())
+        return
+
+    if field == "photo":
+        if cleared:
+            await catalog_service.update_product(session, pid, image_media_id=None)
+            await _finish_product_edit(message, session, state, "Rasm o'chirildi.")
+        else:
+            await message.answer("🖼 Iltimos, rasm yuboring yoki «🗑 Tozalash» tugmasini bosing.")
+        return
+
+    if field == "name":
+        if len(raw) < 2:
+            await message.answer("❗️ Nom kamida 2 belgidan iborat bo'lsin. Qayta kiriting:")
+            return
+        await catalog_service.update_product(session, pid, name=raw[:200])
+        await _finish_product_edit(message, session, state, "Nom yangilandi.")
+        return
+
+    if field == "desc":
+        await catalog_service.update_product(session, pid, description="" if cleared else raw[:2000])
+        await _finish_product_edit(message, session, state, "Tavsif " + ("o'chirildi." if cleared else "yangilandi."))
+        return
+
+    # Tarjimalar. Bo'sh («🗑 Tozalash») bo'lsa NULL bo'ladi va Mini App o'zbek
+    # variantiga qaytadi — mijoz hech qachon bo'sh nom ko'rmaydi.
+    if field in ("name_ru", "name_en", "desc_ru", "desc_en"):
+        column = {"name_ru": "name_ru", "name_en": "name_en",
+                  "desc_ru": "description_ru", "desc_en": "description_en"}[field]
+        limit = 200 if field.startswith("name") else 2000
+        await catalog_service.update_product(session, pid, **{column: "" if cleared else raw[:limit]})
+        label = {"name_ru": "🇷🇺 Nom (RU)", "name_en": "🇬🇧 Nom (EN)",
+                 "desc_ru": "🇷🇺 Tavsif (RU)", "desc_en": "🇬🇧 Tavsif (EN)"}[field]
+        await _finish_product_edit(
+            message, session, state,
+            f"{label} " + ("o'chirildi." if cleared else "saqlandi."),
+        )
+        return
+
+    if field in ("price", "stock", "sort", "oldprice"):
+        if field == "oldprice" and cleared:
+            await catalog_service.update_product(session, pid, old_price=None)
+            await _finish_product_edit(message, session, state, "Chegirma olib tashlandi.")
+            return
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        if not digits:
+            await message.answer("❗️ Faqat raqam kiriting:")
+            return
+        value = int(digits)
+        if field == "price":
+            if value <= 0:
+                await message.answer("❗️ Narx 0 dan katta bo'lishi kerak. Qayta kiriting:")
+                return
+            await catalog_service.update_product(session, pid, price=value)
+            note = f"Narx: {fmt_money(value, await _currency())}"
+        elif field == "oldprice":
+            if value <= product.price:
+                await message.answer(
+                    "❗️ Eski narx joriy narxdan (<b>"
+                    f"{fmt_money(product.price, await _currency())}</b>) KATTA bo'lishi kerak — "
+                    "aks holda chegirma ko'rinmaydi. Qayta kiriting:"
+                )
+                return
+            await catalog_service.update_product(session, pid, old_price=value)
+            disc = round((1 - product.price / value) * 100)
+            note = f"Chegirma o'rnatildi: −{disc}%"
+        elif field == "stock":
+            await catalog_service.update_product(session, pid, stock=value)
+            note = f"Qoldiq: {value} dona"
+        else:
+            await catalog_service.update_product(session, pid, sort_order=value)
+            note = f"Tartib: {value}"
+        await _finish_product_edit(message, session, state, note)
+        return
+
+    await state.clear()
+    await message.answer("Noma'lum maydon.", reply_markup=kb.main_menu())
+
+
+@router.callback_query(F.data.startswith("ptr:"))
+async def product_translations(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    await state.clear()
+    _, pid, page = callback.data.split(":")
+    product = await catalog_service.get_product(session, int(pid))
+    if not product:
+        await callback.answer("Mahsulot topilmadi.", show_alert=True)
+        return
+    text = (
+        f"🌐 <b>Tarjimalar</b> — {esc(product.name)}\n\n"
+        f"🇺🇿 <b>{esc(product.name)}</b> <i>(asosiy)</i>\n"
+        f"🇷🇺 {esc(product.name_ru) or '<i>— kiritilmagan</i>'}\n"
+        f"🇬🇧 {esc(product.name_en) or '<i>— kiritilmagan</i>'}\n\n"
+        "Tarjima kiritilmasa, Mini App o'zbekcha nomni ko'rsatadi."
+    )
+    await _edit(callback, text, kb.product_translations_kb(product, int(page)))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ctr:"))
+async def category_translations(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    await state.clear()
+    _, cid, page = callback.data.split(":")
+    cat = await catalog_service.get_category(session, int(cid))
+    if not cat:
+        await callback.answer("Kategoriya topilmadi.", show_alert=True)
+        return
+    text = (
+        f"🌐 <b>Tarjimalar</b> — {cat.emoji} {esc(cat.name)}\n\n"
+        f"🇺🇿 <b>{esc(cat.name)}</b> <i>(asosiy)</i>\n"
+        f"🇷🇺 {esc(cat.name_ru) or '<i>— kiritilmagan</i>'}\n"
+        f"🇬🇧 {esc(cat.name_en) or '<i>— kiritilmagan</i>'}\n\n"
+        "Tarjima kiritilmasa, Mini App o'zbekcha nomni ko'rsatadi."
+    )
+    await _edit(callback, text, kb.category_translations_kb(cat, int(page)))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("pcatm:"))
+async def product_category_menu(callback: CallbackQuery, session: AsyncSession):
+    _, pid, page = callback.data.split(":")
+    cats = await catalog_service.list_categories(session, only_active=False)
+    if not cats:
+        await callback.answer("Kategoriyalar yo'q — avval kategoriya qo'shing.", show_alert=True)
+        return
+    await _edit(callback, "🗂 Yangi kategoriyani tanlang:", kb.product_category_kb(cats, int(pid), int(page)))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("pcats:"))
+async def product_category_set(callback: CallbackQuery, session: AsyncSession):
+    _, pid, cat_id, page = callback.data.split(":")
+    product = await catalog_service.update_product(
+        session, int(pid), category_id=(int(cat_id) or None)
+    )
+    if not product:
+        await callback.answer("Mahsulot topilmadi.", show_alert=True)
+        return
+    text, markup = await _product_card(session, product, int(page))
+    await _edit(callback, text, markup)
+    await callback.answer("✅ Kategoriya o'zgartirildi")
+
+
+@router.callback_query(F.data.startswith("ptog:"))
+async def product_toggle(callback: CallbackQuery, session: AsyncSession):
+    _, pid, page = callback.data.split(":")
+    product = await catalog_service.get_product(session, int(pid))
+    if not product:
+        await callback.answer("Mahsulot topilmadi.", show_alert=True)
+        return
+    product = await catalog_service.update_product(session, int(pid), is_active=not product.is_active)
+    text, markup = await _product_card(session, product, int(page))
+    await _edit(callback, text, markup)
+    await callback.answer("🟢 Faol" if product.is_active else "🔴 Nofaol")
+
+
+@router.callback_query(F.data.startswith("pdel:"))
+async def product_delete_confirm(callback: CallbackQuery, session: AsyncSession):
+    # O'chirish TASDIQ bilan — oldin bir bosishda o'chib ketardi.
+    _, pid, page = callback.data.split(":")
+    product = await catalog_service.get_product(session, int(pid))
+    if not product:
+        await callback.answer("Mahsulot topilmadi.", show_alert=True)
+        return
+    await _edit(
+        callback,
+        f"🗑 <b>«{esc(product.name)}»</b> mahsulotini o'chirasizmi?\n\n"
+        "Mahsulot Mini App'dan yo'qoladi, lekin eski buyurtmalar tarixi saqlanadi.",
+        kb.confirm_kb(f"pdok:{pid}:{page}", f"pv:{pid}:{page}", "🗑 Ha, o'chirish"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("pdok:"))
+async def product_delete_do(callback: CallbackQuery, session: AsyncSession):
+    _, pid, page = callback.data.split(":")
+    await catalog_service.soft_delete_product(session, int(pid))
+    text, markup = await _products_page(session, callback.from_user.id, int(page))
+    await _edit(callback, text, markup)
+    await callback.answer("🗑 O'chirildi", show_alert=False)
+
+
+# ═════════════════════════════════════════════════════════════
+#  MAHSULOT QO'SHISH (FSM)
+# ═════════════════════════════════════════════════════════════
+@router.callback_query(F.data == "cat:addp")
+async def add_product_start_cb(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AddProduct.name)
+    await callback.message.answer("Mahsulot nomini kiriting:", reply_markup=kb.cancel_menu())
+    await callback.answer()
+
+
+@router.message(AddProduct.name, F.text)
+async def add_product_name(message: Message, state: FSMContext):
+    name = message.text.strip()
+    if len(name) < 2:
+        await message.answer("❗️ Nom kamida 2 belgidan iborat bo'lsin. Qayta kiriting:")
+        return
+    await state.update_data(name=name[:200])
+    await state.set_state(AddProduct.name_ru)
+    await message.answer(
+        "🇷🇺 Endi mahsulot nomini <b>rus tilida</b> yuboring.\n\n"
+        "<i>Kerak bo'lmasa «⏭ O'tkazib yuborish» — mijoz rus tilida ham "
+        "o'zbekcha nomni ko'radi.</i>",
+        reply_markup=kb.skip_menu(),
+    )
+
+
+@router.message(AddProduct.name_ru, F.text)
+async def add_product_name_ru(message: Message, state: FSMContext):
+    raw = message.text.strip()
+    await state.update_data(name_ru="" if raw == kb.BTN_SKIP else raw[:200])
+    await state.set_state(AddProduct.name_en)
+    await message.answer(
+        "🇬🇧 Endi mahsulot nomini <b>ingliz tilida</b> yuboring "
+        "(yoki «⏭ O'tkazib yuborish»):",
+        reply_markup=kb.skip_menu(),
+    )
+
+
+@router.message(AddProduct.name_en, F.text)
+async def add_product_name_en(message: Message, state: FSMContext):
+    raw = message.text.strip()
+    await state.update_data(name_en="" if raw == kb.BTN_SKIP else raw[:200])
+    await state.set_state(AddProduct.price)
+    await message.answer("Narxini kiriting (faqat raqam, so'mda):", reply_markup=kb.cancel_menu())
+
+
+@router.message(AddProduct.price, F.text)
+async def add_product_price(message: Message, state: FSMContext):
+    digits = "".join(ch for ch in message.text if ch.isdigit())
+    if not digits or int(digits) <= 0:
+        await message.answer("❗️ Narx 0 dan katta raqam bo'lsin. Qayta kiriting:")
+        return
+    await state.update_data(price=int(digits))
+    await state.set_state(AddProduct.stock)
+    await message.answer("Ombordagi qoldiq (soni)ni kiriting:")
+
+
+@router.message(AddProduct.stock, F.text)
+async def add_product_stock(message: Message, state: FSMContext, session: AsyncSession):
+    digits = "".join(ch for ch in message.text if ch.isdigit())
+    if not digits:
+        await message.answer("❗️ Qoldiq faqat raqam bo'lsin. Qayta kiriting:")
+        return
+    await state.update_data(stock=int(digits))
+    cats = await catalog_service.list_categories(session)
+    await state.set_state(AddProduct.category)
+    if cats:
+        await message.answer("Kategoriyani tanlang:", reply_markup=kb.categories_inline(cats))
+    else:
+        await state.update_data(category_id=None)
+        await state.set_state(AddProduct.photo)
+        await message.answer("Mahsulot rasmini yuboring (yoki o'tkazib yuboring):", reply_markup=kb.skip_menu())
+
+
+@router.callback_query(AddProduct.category, F.data.startswith("pcat:"))
+async def add_product_category(callback: CallbackQuery, state: FSMContext):
+    cat_id = int(callback.data.split(":")[1])
+    await state.update_data(category_id=cat_id or None)
+    await state.set_state(AddProduct.photo)
+    await callback.message.answer(
+        "Mahsulot rasmini yuboring (yoki o'tkazib yuboring):", reply_markup=kb.skip_menu()
+    )
+    await callback.answer()
+
+
+@router.message(AddProduct.photo, F.photo)
+async def add_product_photo(message: Message, state: FSMContext, session: AsyncSession):
+    media = await media_service.save_from_telegram(session, message.bot, message.photo[-1].file_id)
+    await _finish_product(message, state, session, image_media_id=(media.id if media else None))
+
+
+@router.message(AddProduct.photo, F.text)
+async def add_product_photo_skip(message: Message, state: FSMContext, session: AsyncSession):
+    await _finish_product(message, state, session, image_media_id=None)
+
+
+async def _finish_product(message, state, session, image_media_id):
+    data = await state.get_data()
+    product = await catalog_service.create_product(
+        session,
+        name=data["name"],
+        name_ru=data.get("name_ru") or None,
+        name_en=data.get("name_en") or None,
+        price=data["price"],
+        category_id=data.get("category_id"),
+        stock=data.get("stock", 0),
+        image_media_id=image_media_id,
+    )
+    await state.clear()
+    await message.answer("✅ Mahsulot qo'shildi.", reply_markup=kb.main_menu())
+    # Darhol kartani ko'rsatamiz — tavsif/chegirma qo'shish uchun qulay.
+    text, markup = await _product_card(session, product, 1)
+    await message.answer(text, reply_markup=markup)
+
+
+# ═════════════════════════════════════════════════════════════
+#  KATEGORIYALAR
+# ═════════════════════════════════════════════════════════════
+async def _categories_page(session: AsyncSession, page: int):
+    cats = await catalog_service.list_categories(session, only_active=False)
+    pages = _pages(len(cats))
+    page = _clamp_page(page, pages)
+    chunk = cats[(page - 1) * kb.PAGE_SIZE: page * kb.PAGE_SIZE]
+    lines = [f"🗂 <b>Kategoriyalar</b> — jami {len(cats)} ta (sahifa {page}/{pages})\n"]
+    if not chunk:
+        lines.append("<i>Kategoriya yo'q. «➕ Kategoriya qo'shish» tugmasini bosing.</i>")
+    else:
+        for c in chunk:
+            count = await catalog_service.count_products(session, category_id=c.id, only_active=False)
+            lines.append(f"{'🟢' if c.is_active else '🔴'} {c.emoji} <b>{esc(c.name)}</b> — {count} mahsulot")
+        lines.append("\n<i>Tahrirlash uchun kategoriya nomini bosing.</i>")
+    return "\n".join(lines), kb.categories_page_kb(chunk, page, pages)
+
+
+@router.callback_query(F.data.startswith("cl:"))
+async def categories_list(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    await state.clear()
+    page = int(callback.data.split(":")[1])
+    text, markup = await _categories_page(session, page)
+    await _edit(callback, text, markup)
+    await callback.answer()
+
+
+async def _category_card(session: AsyncSession, cat, page: int):
+    total = await catalog_service.count_products(session, category_id=cat.id, only_active=False)
+    active = await catalog_service.count_products(session, category_id=cat.id, only_active=True)
+    tr_ru = "✅" if (cat.name_ru or "").strip() else "➖"
+    tr_en = "✅" if (cat.name_en or "").strip() else "➖"
+    text = (
+        f"{'🟢' if cat.is_active else '🔴'} {cat.emoji} <b>{esc(cat.name)}</b>\n\n"
+        f"📦 Mahsulotlar: <b>{total}</b> (faol: {active})\n"
+        f"🌐 Tarjima: 🇷🇺 {tr_ru} · 🇬🇧 {tr_en}\n"
+        f"🔢 Tartib: {cat.sort_order}\n"
+        f"🆔 <code>{cat.id}</code>\n\n"
+        "<i>Nofaol kategoriya Mini App'da ko'rinmaydi.</i>"
+    )
+    return text, kb.category_card_kb(cat, page)
+
+
+@router.callback_query(F.data.startswith("cv:"))
+async def category_view(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    await state.clear()
+    _, cid, page = callback.data.split(":")
+    cat = await catalog_service.get_category(session, int(cid))
+    if not cat:
+        await callback.answer("Kategoriya topilmadi.", show_alert=True)
+        return
+    text, markup = await _category_card(session, cat, int(page))
+    await _edit(callback, text, markup)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ce:"))
+async def category_edit_prompt(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    _, field, cid, page = callback.data.split(":")
+    cat = await catalog_service.get_category(session, int(cid))
+    if not cat:
+        await callback.answer("Kategoriya topilmadi.", show_alert=True)
+        return
+    prompts = {
+        "name": ("✏️ Yangi <b>nom</b>ni yuboring (o'zbekcha — asosiy):", "cancel"),
+        "name_ru": ("🇷🇺 Kategoriya nomini <b>rus tilida</b> yuboring:", "clear"),
+        "name_en": ("🇬🇧 Kategoriya nomini <b>ingliz tilida</b> yuboring:", "clear"),
+        "emoji": ("😀 Yangi <b>emoji</b>ni yuboring (Mini App'da kategoriya yonida ko'rinadi):", "cancel"),
+    }
+    prompt, kb_kind = prompts.get(field, ("Yangi qiymatni yuboring:", "cancel"))
+    await state.set_state(EditCategory.value)
+    await state.update_data(field=field, category_id=cat.id, page=int(page))
+    markup = kb.clear_menu() if kb_kind == "clear" else kb.cancel_menu()
+    await callback.message.answer(f"{cat.emoji} <b>{esc(cat.name)}</b>\n\n{prompt}", reply_markup=markup)
+    await callback.answer()
+
+
+@router.message(EditCategory.value, F.text)
+async def category_edit_value(message: Message, session: AsyncSession, state: FSMContext):
+    data = await state.get_data()
+    field, cid, page = data.get("field"), int(data.get("category_id", 0)), int(data.get("page", 1))
+    raw = (message.text or "").strip()
+    cleared = raw == kb.BTN_CLEAR
+    if field == "name":
+        if len(raw) < 2:
+            await message.answer("❗️ Nom kamida 2 belgidan iborat bo'lsin. Qayta kiriting:")
+            return
+        cat = await catalog_service.update_category(session, cid, name=raw)
+        note = "Nom yangilandi."
+    elif field in ("name_ru", "name_en"):
+        cat = await catalog_service.update_category(session, cid, **{field: "" if cleared else raw})
+        flag = "🇷🇺" if field == "name_ru" else "🇬🇧"
+        note = f"{flag} Tarjima " + ("o'chirildi." if cleared else "saqlandi.")
+    else:
+        cat = await catalog_service.update_category(session, cid, emoji=raw[:8])
+        note = "Emoji yangilandi."
+    await state.clear()
+    if not cat:
+        await message.answer("Kategoriya topilmadi.", reply_markup=kb.main_menu())
+        return
+    await message.answer(f"✅ {note}", reply_markup=kb.main_menu())
+    text, markup = await _category_card(session, cat, page)
+    await message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(F.data.startswith("ctog:"))
+async def category_toggle(callback: CallbackQuery, session: AsyncSession):
+    _, cid, page = callback.data.split(":")
+    cat = await catalog_service.get_category(session, int(cid))
+    if not cat:
+        await callback.answer("Kategoriya topilmadi.", show_alert=True)
+        return
+    cat = await catalog_service.update_category(session, int(cid), is_active=not cat.is_active)
+    text, markup = await _category_card(session, cat, int(page))
+    await _edit(callback, text, markup)
+    await callback.answer("🟢 Faol" if cat.is_active else "🔴 Nofaol")
+
+
+@router.callback_query(F.data.startswith("cmv:"))
+async def category_move(callback: CallbackQuery, session: AsyncSession):
+    _, cid, direction, page = callback.data.split(":")
+    moved = await catalog_service.move_category(session, int(cid), int(direction))
+    if not moved:
+        await callback.answer("Bu chegara — surib bo'lmaydi.", show_alert=False)
+        return
+    text, markup = await _categories_page(session, int(page))
+    await _edit(callback, text, markup)
+    await callback.answer("✅ Tartib o'zgardi")
+
+
+@router.callback_query(F.data.startswith("cdel:"))
+async def category_delete_confirm(callback: CallbackQuery, session: AsyncSession):
+    _, cid, page = callback.data.split(":")
+    cat = await catalog_service.get_category(session, int(cid))
+    if not cat:
+        await callback.answer("Kategoriya topilmadi.", show_alert=True)
+        return
+    count = await catalog_service.count_products(session, category_id=cat.id, only_active=False)
+    warn = (
+        f"Unda <b>{count}</b> ta mahsulot bor — <b>mahsulotlar o'chmaydi</b>, "
+        "faqat kategoriyasiz bo'lib qoladi (Mini App'da «Hammasi» ostida ko'rinadi)."
+        if count else "Unda mahsulot yo'q."
+    )
+    await _edit(
+        callback,
+        f"🗑 <b>{cat.emoji} {esc(cat.name)}</b> kategoriyasini <b>butunlay "
+        f"o'chirasizmi?</b>\n\n{warn}\n\n"
+        "⚠️ Bu amalni <b>qaytarib bo'lmaydi</b>. Vaqtincha yashirish uchun "
+        "«🔴 Nofaol qilish» tugmasidan foydalaning.",
+        kb.confirm_kb(f"cdok:{cid}:{page}", f"cv:{cid}:{page}", "🗑 Ha, butunlay o'chirish"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cdok:"))
+async def category_delete_do(callback: CallbackQuery, session: AsyncSession):
+    _, cid, page = callback.data.split(":")
+    deleted, moved = await catalog_service.delete_category(session, int(cid))
+    if not deleted:
+        await callback.answer("Kategoriya topilmadi (allaqachon o'chirilgan).", show_alert=True)
+        text, markup = await _categories_page(session, int(page))
+        await _edit(callback, text, markup)
+        return
+    text, markup = await _categories_page(session, int(page))
+    await _edit(callback, text, markup)
+    note = f"🗑 O'chirildi · {moved} mahsulot kategoriyasiz qoldi" if moved else "🗑 O'chirildi"
+    await callback.answer(note, show_alert=bool(moved))
+
+
+@router.callback_query(F.data == "cat:addc")
+async def add_category_start_cb(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AddCategory.name)
+    await callback.message.answer("Kategoriya nomini kiriting:", reply_markup=kb.cancel_menu())
+    await callback.answer()
+
+
+@router.message(AddCategory.name, F.text)
+async def add_category_name(message: Message, state: FSMContext):
+    name = message.text.strip()
+    if len(name) < 2:
+        await message.answer("❗️ Nom kamida 2 belgidan iborat bo'lsin. Qayta kiriting:")
+        return
+    await state.update_data(name=name[:120])
+    await state.set_state(AddCategory.name_ru)
+    await message.answer(
+        "🇷🇺 Kategoriya nomini <b>rus tilida</b> yuboring.\n\n"
+        "<i>Kerak bo'lmasa «⏭ O'tkazib yuborish».</i>",
+        reply_markup=kb.skip_menu(),
+    )
+
+
+@router.message(AddCategory.name_ru, F.text)
+async def add_category_name_ru(message: Message, state: FSMContext):
+    raw = message.text.strip()
+    await state.update_data(name_ru="" if raw == kb.BTN_SKIP else raw[:120])
+    await state.set_state(AddCategory.name_en)
+    await message.answer(
+        "🇬🇧 Kategoriya nomini <b>ingliz tilida</b> yuboring "
+        "(yoki «⏭ O'tkazib yuborish»):",
+        reply_markup=kb.skip_menu(),
+    )
+
+
+@router.message(AddCategory.name_en, F.text)
+async def add_category_name_en(message: Message, state: FSMContext):
+    raw = message.text.strip()
+    await state.update_data(name_en="" if raw == kb.BTN_SKIP else raw[:120])
+    await state.set_state(AddCategory.emoji)
+    await message.answer(
+        "Emoji yuboring (masalan 🥛 🧈 🧀 🍦) yoki o'tkazib yuboring:",
+        reply_markup=kb.skip_menu(),
+    )
+
+
+@router.message(AddCategory.emoji, F.text)
+async def add_category_emoji(message: Message, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+    emoji = "🥛" if message.text == kb.BTN_SKIP else message.text.strip()[:8]
+    cat = await catalog_service.create_category(
+        session,
+        name=data["name"],
+        emoji=emoji,
+        name_ru=data.get("name_ru") or None,
+        name_en=data.get("name_en") or None,
+    )
+    await state.clear()
+    await message.answer(
+        f"✅ Kategoriya qo'shildi: {cat.emoji} {esc(cat.name)}", reply_markup=kb.main_menu()
+    )
+    text, markup = await _categories_page(session, 1)
+    await message.answer(text, reply_markup=markup)
+
+
+# ═════════════════════════════════════════════════════════════
+#  SOZLAMALAR
+# ═════════════════════════════════════════════════════════════
+async def _settings_text() -> str:
+    hours = await settings_service.get("working_hours", "")
+    return (
+        "⚙️ <b>Do'kon sozlamalari</b>\n\n"
+        f"🕒 Ish vaqti: <code>{esc(hours) or '—'}</code>\n\n"
+        "Guruhni tanlang:"
+    )
+
+
+async def _open_settings(message: Message):
+    await message.answer(await _settings_text(), reply_markup=kb.settings_menu())
+
+
+@router.callback_query(F.data == "setg:menu")
+async def settings_menu_cb(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await _edit(callback, await _settings_text(), kb.settings_menu())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("setg:"))
+async def settings_group(callback: CallbackQuery):
+    group = callback.data.split(":", 1)[1]
+    if group not in kb.SETTING_GROUPS:
+        await callback.answer("Noma'lum guruh.", show_alert=True)
+        return
+    title, keys = kb.SETTING_GROUPS[group]
+    lines = [f"{title}\n"]
+    for key in keys:
+        label = kb.SETTING_LABELS.get(key, key)
+        typ = kb.SETTING_TYPES.get(key, "text")
+        val = await settings_service.get(key, "")
+        if typ == "image":
+            shown = "✅ o'rnatilgan" if val else "—"
+        elif typ == "int":
+            shown = fmt_money(val or 0, await _currency())
+        else:
+            shown = (val[:44] + "…") if len(val) > 44 else (val or "—")
+        lines.append(f"• {label}: <code>{esc(shown)}</code>")
+        # Sozlama QAYERDA ko'rinishini eslatib turamiz (ikki rasm uchun muhim).
+        hint = kb.SETTING_HINTS.get(key)
+        if hint:
+            lines.append(f"   <i>{esc(hint)}</i>")
+    lines.append("\nO'zgartirish uchun tugmani bosing:")
+    await _edit(callback, "\n".join(lines), kb.settings_group_kb(group))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set:"))
+async def choose_setting(callback: CallbackQuery, state: FSMContext):
+    key = callback.data.split(":", 1)[1]
+    typ = kb.SETTING_TYPES.get(key, "text")
+    label = kb.SETTING_LABELS.get(key, key)
+    current = await settings_service.get(key, "")
+    await state.set_state(EditSetting.value)
+    await state.update_data(key=key, typ=typ)
+
+    if typ == "image":
+        prompt = "🖼 Yangi rasmni yuboring (yoki «🗑 Tozalash» bilan o'chiring):"
+    elif typ == "int":
+        prompt = "Yangi qiymatni raqamda kiriting (so'm). 0 = o'chirilgan:"
+    elif key == "working_hours":
+        prompt = (
+            "Ish vaqtini <b>24 soatlik</b> formatda kiriting.\n"
+            "Namuna: <code>09:00 - 22:00</code>\n\n"
+            "• Tungi ish uchun: <code>22:00 - 06:00</code>\n"
+            "• 24 soat ochiq uchun: <code>00:00 - 24:00</code>\n"
+            "Vaqt O'zbekiston vaqti (Toshkent) bo'yicha hisoblanadi."
+        )
+    elif key == "admin_contact":
+        prompt = (
+            "Operatorning Telegram username'ini yuboring — mijozlar Mini App'dagi "
+            "«Operator bilan bog'lanish» tugmasi orqali yozadi.\n"
+            "Namuna: <code>@dokon_operator</code>"
+        )
+    else:
+        prompt = "Yangi qiymatni kiriting:"
+
+    shown = ("✅ o'rnatilgan" if (typ == "image" and current) else (current or "—"))
+    markup = kb.clear_menu() if typ == "image" else kb.cancel_menu()
+    await callback.message.answer(
+        f"<b>{label}</b>\nJoriy qiymat: <code>{esc(shown)}</code>\n\n{prompt}",
+        reply_markup=markup,
+    )
+    await callback.answer()
+
+
+@router.message(EditSetting.value, F.photo)
+async def save_setting_photo(message: Message, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+    key = data.get("key")
+    if data.get("typ") != "image":
+        await message.answer("Bu sozlama uchun rasm emas, matn kiriting.")
+        return
+    # Rasmni DB'ga (Media) saqlaymiz — keyin Sotuv bot ham ko'rsata oladi.
+    media = await media_service.save_from_telegram(session, message.bot, message.photo[-1].file_id)
+    if not media:
+        await message.answer("❗️ Rasmni saqlab bo'lmadi, qayta urinib ko'ring.")
+        return
+    await settings_service.set(key, str(media.id))
+    await state.clear()
+    await message.answer("✅ Rasm saqlandi.", reply_markup=kb.main_menu())
+
+
+@router.message(EditSetting.value, F.text)
+async def save_setting_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    key = data.get("key")
+    typ = data.get("typ", "text")
+    value = message.text.strip()
+
+    if typ == "image":
+        if value == kb.BTN_CLEAR or value.lower() in ("o'chirish", "ochirish", "delete", "-"):
+            await settings_service.set(key, "")
+            await state.clear()
+            await message.answer("✅ Rasm o'chirildi.", reply_markup=kb.main_menu())
+        else:
+            await message.answer("🖼 Iltimos, rasm yuboring yoki «🗑 Tozalash» tugmasini bosing.")
+        return
+
+    if typ == "int":
+        digits = "".join(ch for ch in value if ch.isdigit())
+        if not digits:
+            await message.answer("❗️ Faqat raqam kiriting:")
+            return
+        value = digits
+
+    # Ish vaqti — VALIDATSIYA. Yaroqsiz format saqlansa do'kon 24/7 ochiq bo'lib
+    # qolardi (fallback "doim ochiq"), shuning uchun endi qabul qilinmaydi.
+    if key == "working_hours":
+        ok, normalized = settings_service.validate_working_hours(value)
+        if not ok:
+            await message.answer(
+                "❗️ Format tushunarsiz. Namuna: <code>09:00 - 22:00</code>\n"
+                "Yoki 24 soat ochiq uchun: <code>00:00 - 24:00</code>\n"
+                "Qayta kiriting:"
+            )
+            return
+        value = normalized
+
+    # Operator username — normalizatsiya: `@user`, `user`, `https://t.me/user`
+    # hammasini `@user` ga keltiramiz.
+    if key == "admin_contact":
+        raw = value.strip()
+        if raw:
+            for pref in ("https://t.me/", "http://t.me/", "t.me/", "tg://resolve?domain="):
+                if raw.lower().startswith(pref):
+                    raw = raw[len(pref):]
+                    break
+            raw = raw.lstrip("@").strip()
+            cleaned = "".join(ch for ch in raw if ch.isalnum() or ch == "_")
+            if not cleaned or len(cleaned) < 3:
+                await message.answer(
+                    "❗️ Username noto'g'ri. Misol: <code>@admin_username</code> "
+                    "yoki <code>admin_username</code>."
+                )
+                return
+            value = f"@{cleaned}"
+        else:
+            value = ""
+
+    await settings_service.set(key, value)
+    await state.clear()
+    label = kb.SETTING_LABELS.get(key, key)
+    await message.answer(
+        f"✅ Saqlandi: <b>{label}</b>\nYangi qiymat: <code>{esc(value) or '—'}</code>",
+        reply_markup=kb.main_menu(),
+    )
+
+
+# ═════════════════════════════════════════════════════════════
+#  DO'KON OCHIQ/YOPIQ
+# ═════════════════════════════════════════════════════════════
+async def _shop_status_text() -> str:
+    force_closed = await settings_service.get_bool("force_closed", False)
+    hours = await settings_service.get("working_hours", "")
+    effective = await settings_service.is_shop_open()
+    if effective:
+        line = "🟢 <b>OCHIQ</b> — buyurtmalar qabul qilinmoqda"
+    elif force_closed:
+        line = "🔴 <b>YOPIQ</b> — siz qo'lda vaqtincha yopib qo'ygansiz"
+    else:
+        line = f"🟡 <b>Hozir ish vaqti emas</b> ({esc(hours)}) — ish vaqti kelganda ochiladi"
+    return (
+        f"🏪 <b>Do'kon holati</b>\n\n{line}\n\n"
+        f"🕒 Ish vaqti: <code>{esc(hours) or '—'}</code> (O‘zbekiston vaqti)"
+    )
+
+
+async def _open_shop_status(message: Message):
+    force_closed = await settings_service.get_bool("force_closed", False)
+    await message.answer(await _shop_status_text(), reply_markup=kb.shop_status_kb(force_closed))
+
+
+@router.callback_query(F.data == "shopopen")
+async def shop_open(callback: CallbackQuery):
+    await settings_service.set("force_closed", "0")
+    await _edit(callback, await _shop_status_text(), kb.shop_status_kb(False))
+    await callback.answer("🟢 Do'kon ish vaqti bo'yicha ochiq")
+
+
+@router.callback_query(F.data == "shopclose")
+async def shop_close(callback: CallbackQuery):
+    await settings_service.set("force_closed", "1")
+    await _edit(callback, await _shop_status_text(), kb.shop_status_kb(True))
+    await callback.answer("🔴 Do'kon vaqtincha yopildi")
+
+
+# ═════════════════════════════════════════════════════════════
+#  DO'KON MANZILI (lokatsiya + izoh)
+# ═════════════════════════════════════════════════════════════
+@router.callback_query(F.data == "shoploc")
+async def shop_location_start(callback: CallbackQuery, state: FSMContext):
+    lat = await settings_service.get("shop_lat", "")
+    lng = await settings_service.get("shop_lng", "")
+    note = await settings_service.get("shop_address", "")
+    current = "Hozircha o'rnatilmagan."
+    if lat and lng:
+        try:
+            current = f"📍 {esc(note) or 'manzil'}\n🗺 {yandex_maps_link(float(lat), float(lng))}"
+        except ValueError:
+            pass
+    await state.set_state(ShopLocation.location)
+    await callback.message.answer(
+        f"📍 <b>Do'kon manzili</b>\n\nJoriy: {current}\n\n"
+        "Yangi lokatsiyani yuboring (pastdagi «📍 Lokatsiyani yuborish» tugmasi orqali "
+        "yoki 📎 → Location).\n\n"
+        "<i>Manzil mijozga Mini App profilida xarita havolasi bilan ko'rinadi.</i>",
+        reply_markup=kb.location_request_menu(),
+    )
+    await callback.answer()
+
+
+@router.message(ShopLocation.location, F.location)
+async def shop_location_received(message: Message, state: FSMContext):
+    await state.update_data(lat=message.location.latitude, lng=message.location.longitude)
+    await state.set_state(ShopLocation.comment)
+    await message.answer(
+        "✍️ Endi manzil izohini yozing (masalan: «Chilonzor 5, oynali bino, 1-qavat»).\n"
+        "Yoki izohsiz saqlash uchun «⏭ O'tkazib yuborish».",
+        reply_markup=kb.skip_menu(),
+    )
+
+
+@router.message(ShopLocation.location, F.text)
+async def shop_location_need(message: Message):
+    await message.answer("📍 Iltimos, lokatsiyani yuboring (tugma orqali yoki 📎 → Location).")
+
+
+@router.message(ShopLocation.comment, F.text)
+async def shop_location_comment(message: Message, state: FSMContext):
+    data = await state.get_data()
+    comment = "" if message.text == kb.BTN_SKIP else message.text.strip()[:400]
+    await settings_service.set("shop_lat", str(data.get("lat", "")))
+    await settings_service.set("shop_lng", str(data.get("lng", "")))
+    await settings_service.set("shop_address", comment)
+    await state.clear()
+    await message.answer(
+        "✅ Do'kon manzili saqlandi. Mijozlar Mini App profilida va sotuv botda "
+        "«📍 Do'kon manzili» orqali ko'ra oladi.",
+        reply_markup=kb.main_menu(),
+    )
+
+
+# ═════════════════════════════════════════════════════════════
+#  BUYURTMALAR (kuzatuv)
+# ═════════════════════════════════════════════════════════════
+def _status_filter(key: str) -> tuple[str | None, list[str] | None]:
+    if key == "all":
+        return None, None
+    if key == "active":
+        return None, order_service.ACTIVE_STATUSES
+    return key, None
+
+
+async def _orders_page(session: AsyncSession, status_key: str, page: int):
+    status, statuses = _status_filter(status_key)
+    total = await order_service.count_orders(session, status=status, statuses=statuses)
+    pages = _pages(total)
+    page = _clamp_page(page, pages)
+    orders = await order_service.list_orders(
+        session, status=status, statuses=statuses,
+        limit=kb.PAGE_SIZE, offset=(page - 1) * kb.PAGE_SIZE,
+    )
+    currency = await _currency()
+    label = dict(kb.ORDER_FILTERS).get(status_key, status_key)
+
+    lines = [f"🧾 <b>Buyurtmalar</b> — {label}", f"Jami: <b>{total}</b> · sahifa {page}/{pages}\n"]
+    if not orders:
+        lines.append("<i>Bu holatda buyurtma yo'q.</i>")
+    else:
+        for o in orders:
+            when = o.created_at.strftime("%d.%m %H:%M") if o.created_at else "—"
+            paid = "💳" if o.is_paid else "⏳"
+            lines.append(
+                f"#{o.order_number} · {fmt_money(o.grand_total, currency)} {paid}\n"
+                f"    {STATUS_LABELS.get(o.status, o.status)} · {when}"
+            )
+        lines.append("\n<i>Batafsil ko'rish uchun buyurtmani bosing.</i>")
+    return "\n".join(lines), kb.orders_page_kb(orders, status_key, page, pages, currency)
+
+
+async def _open_orders(message: Message, session: AsyncSession):
+    text, markup = await _orders_page(session, "active", 1)
+    await message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(F.data.startswith("ord:"))
+async def orders_list(callback: CallbackQuery, session: AsyncSession):
+    _, status_key, page = callback.data.split(":")
+    text, markup = await _orders_page(session, status_key, int(page))
+    await _edit(callback, text, markup)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ordv:"))
+async def order_view(callback: CallbackQuery, session: AsyncSession):
+    _, oid, status_key, page = callback.data.split(":")
+    order = await order_service.get_order(session, int(oid))
+    if not order:
+        await callback.answer("Buyurtma topilmadi.", show_alert=True)
+        return
+    currency = await _currency()
+    text = order_summary_text(order, currency, for_admin=True)
+    text += f"\n\n<b>Holat: {STATUS_LABELS.get(order.status, order.status)}</b>"
+    if order.cancel_reason:
+        text += f"\n📝 Bekor sababi: {esc(order.cancel_reason)}"
+    text += "\n\n<i>Holatni o'zgartirish — Admin botda.</i>"
+    await _edit(callback, text, kb.order_view_kb(order, status_key, int(page)))
+    await callback.answer()
+
+
+# ═════════════════════════════════════════════════════════════
+#  MARKETING: bannerlar + ommaviy xabar
+# ═════════════════════════════════════════════════════════════
+async def _open_marketing(message: Message, session: AsyncSession):
+    banners = await catalog_service.list_banners(session)
+    await message.answer(
+        "📣 <b>Marketing</b>\n\n"
+        "• <b>Bannerlar</b> — Mini App bosh ekranida katta rasm sifatida "
+        "ko'rinadi va bosilganda mahsulot/kategoriyaga olib boradi.\n"
+        "• <b>Ommaviy xabar</b> — barcha mijozlarga sotuv bot orqali xabar.",
+        reply_markup=kb.marketing_menu(len(banners)),
+    )
+
+
+@router.callback_query(F.data == "mk:menu")
+async def marketing_menu_cb(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    await state.clear()
+    banners = await catalog_service.list_banners(session)
+    await _edit(callback, "📣 <b>Marketing</b>\n\nAmalni tanlang:", kb.marketing_menu(len(banners)))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "bn:list")
+async def banners_list(callback: CallbackQuery, session: AsyncSession):
+    banners = await catalog_service.list_banners(session)
+    lines = ["🖼 <b>Bannerlar</b>\n"]
+    if not banners:
+        lines.append("<i>Banner yo'q. «➕ Banner qo'shish» tugmasini bosing.</i>")
+    else:
+        for b in banners:
+            link = {
+                "none": "havolasiz",
+                "product": f"mahsulot #{b.link_value}",
+                "category": f"kategoriya #{b.link_value}",
+                "url": esc(b.link_value or ""),
+            }.get(b.link_type, "havolasiz")
+            img = "✅" if (b.image_media_id or b.photo_url) else "🚫"
+            lines.append(f"{'🟢' if b.is_active else '🔴'} #{b.id} · rasm {img} · {link}")
+        lines.append("\n<i>Yashil/qizil tugma — yoqish/o'chirish. 🗑 — butunlay o'chirish.</i>")
+    await _edit(callback, "\n".join(lines), kb.banners_kb(banners))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bn:tog:"))
+async def banner_toggle(callback: CallbackQuery, session: AsyncSession):
+    banner = await catalog_service.toggle_banner(session, int(callback.data.split(":")[2]))
+    if not banner:
+        await callback.answer("Banner topilmadi.", show_alert=True)
+        return
+    await banners_list(callback, session)
+
+
+@router.callback_query(F.data.startswith("bn:del:"))
+async def banner_delete_confirm(callback: CallbackQuery):
+    bid = callback.data.split(":")[2]
+    await _edit(
+        callback,
+        f"🗑 <b>#{bid}</b> bannerini butunlay o'chirasizmi?",
+        kb.confirm_kb(f"bn:dok:{bid}", "bn:list", "🗑 Ha, o'chirish"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bn:dok:"))
+async def banner_delete_do(callback: CallbackQuery, session: AsyncSession):
+    await catalog_service.delete_banner(session, int(callback.data.split(":")[2]))
+    await callback.answer("🗑 O'chirildi")
+    await banners_list(callback, session)
+
+
+@router.callback_query(F.data == "bn:add")
+async def banner_add_start(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AddBanner.photo)
+    await callback.message.answer(
+        "🖼 Banner rasmini yuboring.\n\n"
+        "<i>Tavsiya: gorizontal (2:1), masalan 1200×600 px — Mini App'da shu nisbatda "
+        "kesiladi.</i>",
+        reply_markup=kb.cancel_menu(),
+    )
+    await callback.answer()
+
+
+@router.message(AddBanner.photo, F.photo)
+async def banner_add_photo(message: Message, state: FSMContext, session: AsyncSession):
+    media = await media_service.save_from_telegram(session, message.bot, message.photo[-1].file_id)
+    if not media:
+        await message.answer("❗️ Rasmni saqlab bo'lmadi, qayta urinib ko'ring.")
+        return
+    await state.update_data(image_media_id=media.id)
+    await state.set_state(AddBanner.link_type)
+    await message.answer(
+        "✅ Rasm saqlandi.\n\nBanner bosilganda nima bo'lsin?",
+        reply_markup=kb.banner_link_type_kb(),
+    )
+
+
+@router.message(AddBanner.photo, F.text)
+async def banner_add_photo_need(message: Message):
+    await message.answer("🖼 Iltimos, rasm yuboring (yoki «❌ Bekor qilish»).")
+
+
+@router.callback_query(AddBanner.link_type, F.data.startswith("bl:"))
+async def banner_link_type(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    link_type = callback.data.split(":")[1]
+    if link_type == "none":
+        data = await state.get_data()
+        banner = await catalog_service.create_banner(
+            session, image_media_id=data.get("image_media_id"), link_type="none"
+        )
+        await state.clear()
+        await callback.message.answer(
+            f"✅ Banner #{banner.id} qo'shildi va Mini App'da ko'rinadi.",
+            reply_markup=kb.main_menu(),
+        )
+        await callback.answer()
+        return
+
+    await state.update_data(link_type=link_type)
+    await state.set_state(AddBanner.link_value)
+    if link_type == "url":
+        prompt = "🔗 To'liq havolani yuboring (masalan <code>https://example.uz/aksiya</code>):"
+    elif link_type == "product":
+        prompt = "📦 Mahsulot <b>ID</b> raqamini yuboring (mahsulot kartasida 🆔 ko'rinadi):"
+    else:
+        cats = await catalog_service.list_categories(session, only_active=False)
+        listing = "\n".join(f"• <code>{c.id}</code> — {c.emoji} {esc(c.name)}" for c in cats) or "—"
+        prompt = f"🗂 Kategoriya <b>ID</b> raqamini yuboring:\n\n{listing}"
+    await callback.message.answer(prompt, reply_markup=kb.cancel_menu())
+    await callback.answer()
+
+
+@router.message(AddBanner.link_value, F.text)
+async def banner_link_value(message: Message, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+    link_type = data.get("link_type", "none")
+    raw = (message.text or "").strip()
+
+    if link_type == "url":
+        if not raw.lower().startswith(("http://", "https://")):
+            await message.answer("❗️ Havola <code>https://</code> bilan boshlanishi kerak. Qayta yuboring:")
+            return
+        link_value = raw[:256]
+    else:
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        if not digits:
+            await message.answer("❗️ Faqat ID raqamini yuboring:")
+            return
+        target_id = int(digits)
+        # Havola haqiqiy obyektga ko'rsatishini TEKSHIRAMIZ — aks holda mijoz
+        # bannerni bosganda hech nima bo'lmaydi (jim xato).
+        if link_type == "product":
+            exists = await catalog_service.get_product(session, target_id)
+        else:
+            exists = await catalog_service.get_category(session, target_id)
+        if not exists:
+            await message.answer(f"❗️ <code>{target_id}</code> ID topilmadi. Qayta kiriting:")
+            return
+        link_value = str(target_id)
+
+    banner = await catalog_service.create_banner(
+        session,
+        image_media_id=data.get("image_media_id"),
+        link_type=link_type,
+        link_value=link_value,
+    )
+    await state.clear()
+    await message.answer(
+        f"✅ Banner #{banner.id} qo'shildi va Mini App bosh ekranida ko'rinadi.",
+        reply_markup=kb.main_menu(),
+    )
+
+
+# ── Ommaviy xabar (broadcast) ──
+@router.callback_query(F.data == "bc:ask")
+async def broadcast_ask(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    count = len(await user_service.list_customer_ids(session))
+    await state.set_state(Broadcast.text)
+    await callback.message.answer(
+        f"📣 <b>Ommaviy xabar</b>\n\n"
+        f"Xabar <b>{count}</b> ta mijozga sotuv bot orqali yuboriladi.\n\n"
+        "Yuboriladigan matnni yozing (HTML: <code>&lt;b&gt;</code>, "
+        "<code>&lt;i&gt;</code> ishlatish mumkin):",
+        reply_markup=kb.cancel_menu(),
+    )
+    await callback.answer()
+
+
+async def _open_broadcast(message: Message, state: FSMContext, session: AsyncSession):
+    count = len(await user_service.list_customer_ids(session))
+    await state.set_state(Broadcast.text)
+    await message.answer(
+        f"📣 <b>Ommaviy xabar</b>\n\nXabar <b>{count}</b> ta mijozga yuboriladi.\n"
+        "Matnni yozing:",
+        reply_markup=kb.cancel_menu(),
+    )
+
+
+@router.message(Broadcast.text, F.text)
+async def broadcast_preview(message: Message, state: FSMContext, session: AsyncSession):
+    text = (message.text or "").strip()
+    if len(text) < 3:
+        await message.answer("❗️ Xabar juda qisqa. Qayta yozing:")
+        return
+    # HTML ni OLDINDAN tekshiramiz: noto'g'ri teg bo'lsa yuborishda 400 xatosi
+    # chiqib, mijozlarga hech nima yetib bormaydi. Shu sabab avval o'zimizga
+    # ko'rsatib ko'ramiz.
+    await message.answer("👁 <b>Ko'rinishi:</b>", reply_markup=kb.main_menu())
+    try:
+        await message.answer(text)
+    except TelegramBadRequest as e:
+        await message.answer(
+            "❗️ Matndagi HTML teglar noto'g'ri — Telegram qabul qilmadi.\n"
+            f"<code>{esc(e)}</code>\n\n"
+            "Teglarni tuzatib qayta yuboring (yoki oddiy matn yozing):"
+        )
+        return
+    await state.update_data(text=text)
+    count = len(await user_service.list_customer_ids(session))
+    await message.answer(
+        f"Shu xabar <b>{count}</b> ta mijozga yuborilsinmi?",
+        reply_markup=kb.confirm_kb("bc:go", "bc:no", "📣 Ha, yuborish"),
+    )
+
+
+@router.callback_query(F.data == "bc:no")
+async def broadcast_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await _edit(callback, "Ommaviy xabar bekor qilindi.")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "bc:go")
+async def broadcast_send(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+    text = data.get("text", "")
+    await state.clear()
+    if not text:
+        await callback.answer("Xabar matni topilmadi.", show_alert=True)
+        return
+    ids = await user_service.list_customer_ids(session)
+    await _edit(callback, f"📣 Yuborish boshlandi — <b>{len(ids)}</b> mijoz…")
+    await callback.answer()
+
+    async def _run(chat_id: int, recipients: list[int], body: str, bot):
+        """Fon vazifasi: handler bloklanmasin (aks holda bot javob bermay qoladi)."""
+        sent = failed = 0
+        for tid in recipients:
+            if await notify_service.notify_customer(tid, body):
+                sent += 1
+            else:
+                failed += 1
+            # Telegram limiti (~30 msg/s) — xavfsiz tempda yuboramiz.
+            await asyncio.sleep(0.05)
+        try:
+            await bot.send_message(
+                chat_id,
+                f"📣 <b>Yuborish tugadi</b>\n\n✅ Yetib bordi: {sent}\n"
+                f"🚫 Yetmadi (bloklagan/o'chirgan): {failed}",
+            )
+        except Exception as e:
+            logger.warning("Broadcast hisobotini yuborib bo'lmadi: %s", e)
+
+    asyncio.create_task(_run(callback.from_user.id, ids, text, callback.bot))
+
+
+# ═════════════════════════════════════════════════════════════
+#  ANALITIKA
+# ═════════════════════════════════════════════════════════════
+async def _analytics_text(session: AsyncSession) -> str:
+    s = await order_service.stats_summary(session)
+    currency = await _currency()
+    users = await user_service.count_users(session)
+    products = await catalog_service.count_active_products(session)
+    out = await catalog_service.count_out_of_stock(session)
+    counts = await order_service.counts_by_status(session)
+
+    status_lines = [
+        f"   {STATUS_LABELS.get(st, st)}: {counts[st]}"
+        for st in ["created", "confirmed", "preparing", "on_way", "delivered", "completed", "canceled", "rejected"]
+        if counts.get(st)
+    ]
+    avg = int(s["revenue"] / max(1, counts.get("delivered", 0) + counts.get("completed", 0)))
+
+    lines = [
+        "📊 <b>Analitika</b>\n",
+        f"💰 Umumiy tushum: <b>{fmt_money(s['revenue'], currency)}</b>",
+        f"🧮 O'rtacha chek: {fmt_money(avg, currency)}",
+        f"📦 Jami buyurtmalar: {s['total_orders']}",
+        f"📅 Bugun: {s['today_orders']}",
+        f"🆕 Kutilmoqda: {s['pending']}",
+        "",
+        f"👥 Mijozlar: {users}",
+        f"🛍 Faol mahsulotlar: {products}",
+    ]
+    if out:
+        lines.append(f"⚠️ Qoldig'i tugagan: <b>{out}</b> ta — to'ldirish kerak")
+    lines += ["", "<b>Buyurtmalar holati bo'yicha:</b>"]
+    lines += status_lines or ["   —"]
+    return "\n".join(lines)
+
+
+async def _open_analytics(message: Message, session: AsyncSession):
+    await message.answer(await _analytics_text(session), reply_markup=kb.analytics_kb())
+
+
+@router.callback_query(F.data == "an:main")
+async def analytics_cb(callback: CallbackQuery, session: AsyncSession):
+    await _edit(callback, await _analytics_text(session), kb.analytics_kb())
+    await callback.answer("🔄 Yangilandi")
+
+
+@router.callback_query(F.data == "an:top")
+async def analytics_top(callback: CallbackQuery, session: AsyncSession):
+    currency = await _currency()
+    rows = await order_service.top_products(session, limit=10)
+    lines = ["🏆 <b>Eng ko'p sotilgan mahsulotlar</b>\n"]
+    if not rows:
+        lines.append("<i>Hali sotuv yo'q.</i>")
+    else:
+        medals = ["🥇", "🥈", "🥉"]
+        for i, (name, qty, total) in enumerate(rows):
+            mark = medals[i] if i < 3 else f"{i + 1}."
+            lines.append(f"{mark} <b>{esc(name)}</b>\n    {qty} dona · {fmt_money(total, currency)}")
+    await _edit(callback, "\n".join(lines), kb.analytics_top_kb())
+    await callback.answer()
+
+
+# ═════════════════════════════════════════════════════════════
+#  TIZIM HOLATI
+# ═════════════════════════════════════════════════════════════
+async def _system_text() -> str:
+    from core.bots import registry
+
+    webapp = WEBAPP_URL or "❗️ o'rnatilmagan (WEBAPP_URL)"
+    force_closed = await settings_service.get_bool("force_closed", False)
+    hours = await settings_service.get("working_hours", "")
+    effective = await settings_service.is_shop_open()
+    await admin_service.ensure_loaded()
+    return (
+        "ℹ️ <b>Tizim holati</b>\n\n"
+        f"🛒 Sotuv bot: {'🟢' if registry.customer_bot else '🔴'}\n"
+        f"👨‍💼 Admin bot: {'🟢' if registry.admin_bot else '🔴'}\n"
+        f"👑 Super Admin bot: {'🟢' if registry.superadmin_bot else '🔴'}\n"
+        f"🌐 Mini App: <code>{esc(webapp)}</code>\n\n"
+        f"🏪 Do'kon holati: <b>{'🟢 OCHIQ' if effective else '🔴 YOPIQ'}</b>\n"
+        f"   • Majburiy yopish: {'🔴 YOQILGAN' if force_closed else '🟢 yo‘q'}\n"
+        f"   • Ish vaqti: <code>{esc(hours) or '—'}</code> (O‘zbekiston vaqti)\n\n"
+        f"👑 Superadminlar: {len(admin_service.all_superadmin_ids())}\n"
+        f"🛡 Adminlar: {len(admin_service.all_admin_ids())}"
+    )
+
+
+async def _open_system(message: Message):
+    await message.answer(await _system_text(), reply_markup=kb.system_kb())
+
+
+@router.callback_query(F.data == "sys:main")
+async def system_status_cb(callback: CallbackQuery):
+    await _edit(callback, await _system_text(), kb.system_kb())
+    await callback.answer("🔄 Yangilandi")
+
+
+# ═════════════════════════════════════════════════════════════
+#  JAMOA: ADMINLAR / SUPER ADMINLAR
+# ═════════════════════════════════════════════════════════════
+def _role_title(role: str) -> str:
+    return "👑 Super Admin" if role == "superadmin" else "🛡 Admin"
+
+
+def _fmt_role_row(rec) -> str:
+    who = esc(rec.full_name or "")
+    uname = f" · @{esc(rec.username)}" if rec.username else ""
+    badges = ""
+    if getattr(rec, "is_superadmin", False):
+        badges += " 👑"
+    if getattr(rec, "is_admin", False):
+        badges += " 🛡"
+    return f"• <code>{rec.telegram_id}</code>{(' — ' + who) if who else ''}{uname}{badges}"
+
+
+TEAM_TEXT = (
+    "👥 <b>Jamoa</b>\n\n"
+    "• <b>🛡 Admin</b> — buyurtmalarni qabul qiladi va holatini boshqaradi (Admin bot).\n"
+    "• <b>👑 Super Admin</b> — do'konni to'liq boshqaradi (shu bot).\n\n"
+    "Qo'shish uchun foydalanuvchini <b>4 xil usulda</b> ko'rsatish mumkin: "
+    "kontakt ulashish, xabarini forward qilish, @username yoki raqamli ID.\n\n"
+    "Amalni tanlang:"
+)
+
+
+async def _open_team(message: Message):
+    await message.answer(TEAM_TEXT, reply_markup=kb.roles_menu_inline())
+
+
+@router.callback_query(F.data == "roles:menu")
+async def roles_menu_cb(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await _edit(callback, TEAM_TEXT, kb.roles_menu_inline())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("roles:list:"))
+async def roles_list(callback: CallbackQuery, session: AsyncSession):
+    role = callback.data.split(":", 2)[2]
+    if role not in {"admin", "superadmin"}:
+        await callback.answer("Noma'lum rol.", show_alert=True)
+        return
+    rows = await admin_service.list_by_role(session, role)
+    text_lines = [f"<b>{_role_title(role)} ro'yxati</b>", ""]
+
+    env_ids = admin_service.env_superadmin_ids() if role == "superadmin" else admin_service.env_admin_ids()
+    if env_ids:
+        text_lines.append("🔒 <i>ENV (o'chirib bo'lmaydi):</i>")
+        for tid in sorted(env_ids):
+            text_lines.append(f"• <code>{tid}</code>")
+        text_lines.append("")
+
+    if rows:
+        text_lines.append("📋 <i>Bot orqali qo'shilgan (chiqarish mumkin):</i>")
+        text_lines.extend(_fmt_role_row(r) for r in rows)
+    else:
+        text_lines.append("📋 <i>Bot orqali qo'shilgan hech kim yo'q.</i>")
+
+    await _edit(callback, "\n".join(text_lines), kb.roles_list_inline(rows, role))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("roles:add:"))
+async def roles_add_prompt(callback: CallbackQuery, state: FSMContext):
+    role = callback.data.split(":", 2)[2]
+    if role not in {"admin", "superadmin"}:
+        await callback.answer("Noma'lum rol.", show_alert=True)
+        return
+    await state.set_state(AddAdminRole.identify)
+    await state.update_data(role=role, added_by=callback.from_user.id)
+    await callback.message.answer(
+        f"➕ Yangi <b>{_role_title(role)}</b> qo'shish\n\n"
+        "Foydalanuvchini quyidagi usullardan BIRI bilan ko'rsating:\n"
+        "1️⃣ «👤 Kontakt ulashish» tugmasi (eng oson)\n"
+        "2️⃣ Uning istalgan xabarini shu yerga <b>forward</b> qiling\n"
+        "3️⃣ <code>@username</code> yozing (u avval botga /start bosgan bo'lishi kerak)\n"
+        "4️⃣ Raqamli <b>Telegram ID</b> yozing",
+        reply_markup=kb.contact_request_menu(),
+    )
+    await callback.answer()
+
+
+async def _grant_role(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext,
+    telegram_id: int,
+    full_name: str = "",
+    username: str | None = None,
+):
+    """Rolni beradi va natijani (DB tasdiqi bilan) xabar qiladi."""
+    data = await state.get_data()
+    role = data.get("role", "admin")
+    added_by = int(data.get("added_by") or message.from_user.id)
+
+    if admin_service.is_env_superadmin(telegram_id) and role == "superadmin":
+        await state.clear()
+        await message.answer(
+            f"ℹ️ <code>{telegram_id}</code> allaqachon ENV orqali super admin. "
+            "Qo'shimcha yozuv kerak emas.",
+            reply_markup=kb.main_menu(),
+        )
+        return
+
+    existing_user = await user_service.get_by_telegram_id(session, telegram_id)
+    note = ""
+    if existing_user is None:
+        note = ("\n\n⚠️ Bu foydalanuvchi hali botlarga <code>/start</code> bosmagan — "
+                "ismi keyinroq avtomatik saqlanadi.")
+    else:
+        full_name = full_name or existing_user.full_name
+        username = username if username is not None else existing_user.username
+
+    try:
+        rec = await admin_service.add_role(
+            session,
+            telegram_id=telegram_id,
+            role=role,
+            added_by=added_by,
+            full_name=full_name or "",
+            username=username,
+        )
+    except Exception as e:
+        logger.exception("Rol qo'shishda xato: tid=%s role=%s: %s", telegram_id, role, e)
+        await state.clear()
+        await message.answer(
+            "❗️ Rol qo'shib bo'lmadi — DB tomonida xatolik.\n"
+            f"<code>{esc(e)}</code>",
+            reply_markup=kb.main_menu(),
+        )
+        return
+
+    await state.clear()
+    verify = await admin_service.get_role(session, telegram_id)
+    persisted = "✅ DB'da saqlandi" if verify else "⚠️ DB'da topilmadi (xatolik)"
+    who = esc(rec.full_name or "")
+    await message.answer(
+        f"✅ Rol berildi: {_role_title(role)}\n"
+        f"👤 <code>{telegram_id}</code>" + (f" — {who}" if who else "") + note +
+        f"\n\n{persisted}",
+        reply_markup=kb.main_menu(),
+    )
+    await message.answer(TEAM_TEXT, reply_markup=kb.roles_menu_inline())
+
+
+@router.message(AddAdminRole.identify, F.contact)
+async def roles_add_by_contact(message: Message, state: FSMContext, session: AsyncSession):
+    """1-usul: kontakt ulashish — ID ni qo'lda yozish shart emas."""
+    contact = message.contact
+    if not contact or not contact.user_id:
+        await message.answer(
+            "❗️ Bu kontakt Telegram foydalanuvchisi emas (ID yo'q). "
+            "Boshqa usulni sinab ko'ring."
+        )
+        return
+    full_name = " ".join(filter(None, [contact.first_name, contact.last_name]))
+    await _grant_role(message, session, state, int(contact.user_id), full_name=full_name)
+
+
+@router.message(AddAdminRole.identify, F.forward_from)
+async def roles_add_by_forward(message: Message, state: FSMContext, session: AsyncSession):
+    """2-usul: foydalanuvchining xabarini forward qilish."""
+    user = message.forward_from
+    full_name = " ".join(filter(None, [user.first_name, user.last_name]))
+    await _grant_role(message, session, state, int(user.id), full_name=full_name, username=user.username)
+
+
+@router.message(AddAdminRole.identify, F.text)
+async def roles_add_by_text(message: Message, state: FSMContext, session: AsyncSession):
+    """3/4-usul: @username yoki raqamli ID."""
+    raw = (message.text or "").strip()
+
+    # Maxfiylik sozlamasi tufayli forward'da muallif yashirilgan bo'lishi mumkin.
+    if message.forward_sender_name and not message.forward_from:
+        await message.answer(
+            "❗️ Bu foydalanuvchi maxfiylik sozlamasi tufayli forward'da yashiringan. "
+            "Iltimos, kontakt ulashish, @username yoki ID dan foydalaning:"
+        )
+        return
+
+    if raw.startswith("@") or (raw and not raw[0].isdigit() and not raw.lstrip("@").isdigit()):
+        user = await user_service.find_by_username(session, raw)
+        if not user:
+            await message.answer(
+                f"❗️ <code>{esc(raw)}</code> topilmadi. Bu foydalanuvchi hali "
+                "botlarimizga <code>/start</code> bosmagan bo'lishi mumkin.\n\n"
+                "Kontakt ulashish yoki raqamli ID dan foydalaning:"
+            )
+            return
+        await _grant_role(
+            message, session, state, int(user.telegram_id),
+            full_name=user.full_name, username=user.username,
+        )
+        return
+
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if not digits or len(digits) < 5:
+        await message.answer(
+            "❗️ Tushunarsiz. Telegram ID odatda 8-10 xonali raqam bo'ladi.\n"
+            "Kontakt ulashish, forward, <code>@username</code> yoki ID yuboring:"
+        )
+        return
+    await _grant_role(message, session, state, int(digits))
+
+
+@router.callback_query(F.data.startswith("roles:del:"))
+async def roles_delete_prompt(callback: CallbackQuery, session: AsyncSession):
+    parts = callback.data.split(":")
+    if len(parts) != 4:
+        await callback.answer("Noma'lum format.", show_alert=True)
+        return
+    role = parts[2]
+    if role not in {"admin", "superadmin"}:
+        await callback.answer("Noma'lum rol.", show_alert=True)
+        return
+    tid = int(parts[3])
+    rec = await admin_service.get_role(session, tid)
+    if rec is None:
+        await callback.answer("Yozuv topilmadi (allaqachon o'chirilgan).", show_alert=True)
+        return
+    if tid == callback.from_user.id:
+        await callback.answer("❗️ O'zingizni chiqarib yuborolmaysiz.", show_alert=True)
+        return
+    name = esc(rec.full_name or (f"@{rec.username}" if rec.username else ""))
+    other_role_note = ""
+    if role == "admin" and rec.is_superadmin:
+        other_role_note = "\n\nℹ️ <b>👑 Super Admin</b> huquqi saqlanib qoladi."
+    elif role == "superadmin" and rec.is_admin:
+        other_role_note = "\n\nℹ️ <b>🛡 Admin</b> huquqi saqlanib qoladi."
+    await _edit(
+        callback,
+        f"❓ <b>{_role_title(role)}</b> huquqidan chiqarasizmi?\n"
+        f"👤 <code>{tid}</code>" + (f" — {name}" if name else "") + other_role_note,
+        kb.roles_confirm_delete_inline(role, tid),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("roles:delok:"))
+async def roles_delete_do(callback: CallbackQuery, session: AsyncSession):
+    parts = callback.data.split(":")
+    if len(parts) != 4:
+        await callback.answer("Noma'lum format.", show_alert=True)
+        return
+    role = parts[2]
+    if role not in {"admin", "superadmin"}:
+        await callback.answer("Noma'lum rol.", show_alert=True)
+        return
+    tid = int(parts[3])
+    if tid == callback.from_user.id:
+        await callback.answer("❗️ O'zingizni chiqarib yuborolmaysiz.", show_alert=True)
+        return
+    ok = await admin_service.remove_role(session, tid, role=role)
+    if not ok:
+        await callback.answer("Yozuv topilmadi.", show_alert=True)
+        return
+    rec = await admin_service.get_role(session, tid)
+    if rec and (rec.is_admin or rec.is_superadmin):
+        remaining = "👑 Super Admin" if rec.is_superadmin else "🛡 Admin"
+        text = (
+            f"🗑 <code>{tid}</code> ning <b>{_role_title(role)}</b> huquqi olindi.\n"
+            f"ℹ️ Qolgan rol: <b>{remaining}</b>."
+        )
+    else:
+        text = f"🗑 <code>{tid}</code> barcha rollardan chiqarildi."
+    await _edit(callback, text, kb.roles_menu_inline())
+    await callback.answer("✅ Chiqarildi")
