@@ -10,3 +10,8 @@ class CancelOrder(StatesGroup):
 class FindOrder(StatesGroup):
     """Buyurtmani raqami bo'yicha qidirish (#1042)."""
     number = State()
+
+
+class ActivatePayment(StatesGroup):
+    """Onlayn to'lovni QO'LDA tasdiqlash — external_id / payment_id / #raqam."""
+    ref = State()

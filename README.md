@@ -17,6 +17,7 @@ narxlar, mahsulotlar — **hammasi Super Admin tomonidan bot orqali sozlanadi.**
 | 👨‍💼 **Admin bot** (`BOT_ADMIN_TOKEN`) | Buyurtmalarni qabul/tasdiqlash, status boshqaruvi, mahsulot/kategoriya/ombor CRUD. |
 | 👑 **Super Admin bot** (`BOT_SUPERADMIN_TOKEN`) | Do'konni har biznesga moslash (nom, salom, rasm, valyuta, narxlar), analitika. |
 | 🌐 **Mini App** (FastAPI + statik) | Uzum/Yandex uslubidagi xarid interfeysi: katalog, qidiruv, savat, checkout, buyurtmalar. |
+| 💳 **Onlayn to'lov** (WLCM agregatori) | Payme / Click / Uzum / Paylov — bitta integratsiya, to'rt tugma. Buyurtma faqat imzosi tekshirilgan webhook orqali to'langan bo'ladi. Batafsil: [`docs/10-payment-integration.md`](docs/10-payment-integration.md) |
 
 Barchasi **bitta `uvicorn` jarayonida** ishlaydi: FastAPI server ko'tarilganda 3 bot
 `lifespan` ichida `polling` rejimida ishga tushadi (alohida service kerak emas).
@@ -45,6 +46,9 @@ Barchasi **bitta `uvicorn` jarayonida** ishlaydi: FastAPI server ko'tarilganda 3
 - **Narx server tomonida** qayta hisoblanadi — mijoz yuborgan narxga ishonilmaydi.
 - **Atomik ombor**: `UPDATE ... WHERE stock >= qty` — oxirgi mahsulotni bir nechta odam
   bir vaqtda olsa, faqat bittasiga muvaffaqiyat (race-condition himoyasi).
+- **To'lov**: webhook **HMAC-SHA256** imzosi tekshiriladi (secret bo'lmasa so'rov **rad
+  etiladi**), summa buyurtma yaratilganda qulflanadi, `external_id` taxmin qilinmaydi,
+  qayta ishlash **idempotent**. Buyurtmani "to'langan" qilishning boshqa yo'li yo'q.
 
 ---
 
@@ -63,6 +67,17 @@ Barchasi **bitta `uvicorn` jarayonida** ishlaydi: FastAPI server ko'tarilganda 3
    ```
    > `DATABASE_URL` Railway tomonidan avtomatik beriladi.
    > `WEBAPP_URL` qo'yilmasa, Railway domeni (`RAILWAY_PUBLIC_DOMAIN`) avtomatik ishlatiladi.
+
+   **Onlayn to'lov uchun** (bularsiz faqat naqd to'lov ko'rinadi):
+
+   ```
+   API_KEY=...                   # WLCM (wlcm.uz) api_key
+   API_SECRET=...                # WLCM api_secret
+   PAYLOV_WEBHOOK_SECRET=...     # webhook URL ro'yxatga olingandan keyin beriladi
+   ```
+   > WLCM kabinetiga webhook manzili sifatida
+   > `https://<railway-domain>/webhook/paylov` ni kiritasiz.
+   > To'liq ro'yxat va tushuntirish: [`docs/10-payment-integration.md`](docs/10-payment-integration.md)
 
 3. Railway `Procfile`/`railway.json` orqali ishga tushiradi:
    `uvicorn webapp.app:app --host 0.0.0.0 --port $PORT`
@@ -91,8 +106,9 @@ python start.py        # http://localhost:8000
 core/
   config.py              # env sozlamalar, rollar, DATABASE_URL
   database.py            # async engine + idempotent migratsiyalar + seed
-  models/                # Setting, User, Category, Product, Banner, Order...
+  models/                # Setting, User, Category, Product, Banner, Order, Payment...
   services/              # settings, catalog, order (atomik+state machine), user, notify, i18n
+                         # paylov (HMAC API klient) + payment (checkout/webhook)
   bots/
     registry.py          # ishlab turgan bot instansiyalari (botlararo xabar)
     common.py            # DbSession middleware
@@ -102,7 +118,7 @@ core/
 webapp/
   app.py                 # FastAPI + lifespan (3 botni ishga tushiradi)
   security.py            # initData HMAC, rate limit, headerlar
-  routes/                # config, catalog, orders, image proxy
+  routes/                # config, catalog, orders, image proxy, payments (webhook)
   static/                # Mini App (index.html, styles.css, app.js)
 start.py                 # lokal kirish nuqtasi
 docs/                    # mahsulot dizayni va arxitektura hujjatlari
@@ -116,7 +132,13 @@ docs/                    # mahsulot dizayni va arxitektura hujjatlari
 (+ `canceled` / `rejected` — ombor qoldig'i avtomatik qaytariladi)
 
 Har status o'zgarishida mijozga **Sotuv bot orqali avtomatik xabar** (uning tilida) yuboriladi.
-Yangi buyurtma kelganda **Admin botga** darhol bildirishnoma + tasdiqlash tugmalari boriladi.
+
+Buyurtma **Admin botga to'lov hal bo'lgandan keyin** tushadi:
+- **onlayn** — provayder webhooki to'lovni tasdiqlagach,
+- **naqd (yetkazishda)** — mijoz shu usulni tanlashi bilan darhol.
+
+Shu tufayli admin botni to'lanmagan (va ehtimol hech qachon to'lanmaydigan)
+buyurtmalar to'ldirib tashlamaydi.
 
 ---
 

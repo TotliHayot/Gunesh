@@ -1,0 +1,164 @@
+"""
+Paylov / wlcm.uz Integration API klienti.
+
+Bitta agregator orqali Payme / Click / Uzum / Paylov ishlaydi — provayder nomi
+`payment_provider` maydonida uzatiladi, shu sabab har bir to'lov tizimi uchun
+alohida integratsiya kerak emas.
+
+HMAC-SHA256 imzo (hujjat bo'yicha):
+  canonical_path = path (+ '?' + tartiblangan urlencode(query) bo'lsa)
+  body_hash      = SHA256(raw_body_bytes).hexdigest()
+  message        = "{METHOD}\\n{canonical_path}\\n{TIMESTAMP_MS}\\n{body_hash}"
+  signature      = HMAC_SHA256(key=API_SECRET, msg=message).hexdigest()
+
+Headerlar: X-API-Key, X-Timestamp (unix millisekund), X-Signature, Content-Type.
+
+MUHIM: imzo aynan YUBORILGAN raw body baytlari asosida hisoblanadi. Shu sabab
+body bir marta JSON-string (bytes) ga aylantiriladi va xuddi shu baytlar ham
+yuboriladi, ham imzolanadi (qayta serializatsiya imzoni buzadi).
+"""
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import logging
+import time
+from urllib.parse import parse_qsl, urlencode
+
+import httpx
+
+from core.config import (
+    PAYLOV_API_KEY,
+    PAYLOV_API_SECRET,
+    PAYLOV_BASE_URL,
+    PAYLOV_PROVIDER,
+)
+
+logger = logging.getLogger(__name__)
+
+API_PREFIX = "/api/v1"
+_TIMEOUT = httpx.Timeout(30.0)
+
+
+class PaylovError(Exception):
+    """To'lov API xatosi."""
+
+    status_code: int | None = None
+
+
+def _canonical_path(path: str, query_string: str = "") -> str:
+    params = sorted(parse_qsl(query_string, keep_blank_values=True))
+    encoded = urlencode(params)
+    return f"{path}?{encoded}" if encoded else path
+
+
+def make_signature(method: str, path: str, timestamp: str, body: bytes,
+                   query_string: str = "") -> str:
+    """HMAC-SHA256 imzo (raw secret kalit bilan)."""
+    canonical_path = _canonical_path(path, query_string)
+    body_hash = hashlib.sha256(body).hexdigest()
+    message = f"{method.upper()}\n{canonical_path}\n{timestamp}\n{body_hash}"
+    return hmac.new(
+        PAYLOV_API_SECRET.encode(),
+        message.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _serialize(payload: dict | None) -> bytes:
+    if payload is None:
+        return b""
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+async def _request(method: str, path: str, payload: dict | None = None) -> dict:
+    """Imzolangan so'rov yuboradi va JSON javobni qaytaradi."""
+    if not PAYLOV_API_KEY or not PAYLOV_API_SECRET:
+        raise PaylovError("To'lov kalitlari sozlanmagan (API_KEY / API_SECRET).")
+
+    body = _serialize(payload)
+    timestamp = str(int(time.time() * 1000))
+    signature = make_signature(method, path, timestamp, body)
+
+    headers = {
+        "X-API-Key": PAYLOV_API_KEY,
+        "X-Timestamp": timestamp,
+        "X-Signature": signature,
+        "Content-Type": "application/json",
+    }
+    url = f"{PAYLOV_BASE_URL}{path}"
+
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.request(
+                method.upper(), url,
+                content=body if body else None,
+                headers=headers,
+            )
+    except httpx.HTTPError as e:
+        logger.error("❌ To'lov API ulanish xatosi %s: %s", path, e)
+        raise PaylovError(f"Ulanish xatosi: {e}") from e
+
+    if resp.status_code >= 400:
+        logger.error("❌ To'lov API %s %s → %s: %s", method, path, resp.status_code, resp.text[:400])
+        err = PaylovError(f"To'lov API {resp.status_code}: {resp.text[:200]}")
+        err.status_code = resp.status_code
+        raise err
+
+    try:
+        return resp.json()
+    except Exception:
+        return {}
+
+
+# ─────────────────────────────────────────────────────────────
+#  PUBLIC API
+# ─────────────────────────────────────────────────────────────
+async def get_me() -> dict:
+    """
+    Partner ma'lumotlari — kalitlarni tekshirish uchun.
+
+    /me yo'li hujjatlarda ziddiyatli ko'rsatilgan (bir joyda `/partners/me`,
+    boshqa joyda `/integrations/me`). Shu sabab nomzodlarni navbatma-navbat
+    sinaymiz: 404 bo'lsa keyingisiga o'tamiz, boshqa xato bo'lsa darhol uzatamiz.
+    """
+    candidates = [
+        f"{API_PREFIX}/partners/me",
+        f"{API_PREFIX}/integrations/me",
+        f"{API_PREFIX}/me",
+    ]
+    last_err: PaylovError | None = None
+    for path in candidates:
+        try:
+            return await _request("GET", path)
+        except PaylovError as e:
+            if getattr(e, "status_code", None) == 404:
+                last_err = e
+                continue
+            raise
+    raise last_err or PaylovError("get_me: barcha /me yo'llari 404 qaytardi")
+
+
+async def create_checkout(external_id: str, amount_tiyin: int,
+                          return_url: str | None = None,
+                          provider: str | None = None) -> dict:
+    """
+    Checkout (to'lov sahifasi) yaratadi.
+
+    amount_tiyin — TIYINDA (so'm * 100). Javob: {order_id, checkout_url, ...}
+    """
+    payload = {
+        "external_id": external_id,
+        "amount": int(amount_tiyin),
+        "payment_provider": (provider or PAYLOV_PROVIDER),
+    }
+    if return_url:
+        payload["return_url"] = return_url
+    return await _request("POST", f"{API_PREFIX}/integrations/checkout", payload)
+
+
+async def register_fiscalization(payment_id, items: list[dict]) -> dict:
+    """Soliq cheki (fiscal receipt) yaratadi. items — [{title, price, count, vat_percent}]."""
+    payload = {"payment_id": payment_id, "items": items}
+    return await _request("POST", f"{API_PREFIX}/fiscalization/register", payload)

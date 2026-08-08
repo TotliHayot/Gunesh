@@ -153,3 +153,109 @@ DEFAULT_SETTINGS = {
     # ham shu manzil mijozga yuboriladi. Bo'sh bo'lsa oddiy fallback ishlatiladi.
     "admin_contact": "",
 }
+
+
+
+# ─────────────────────────────────────────────────────────────
+#  PAYLOV / wlcm.uz TO'LOV TIZIMI
+# ─────────────────────────────────────────────────────────────
+# Bitta agregator (WLCM) orqali Payme / Click / Uzum / Paylov ishlaydi:
+# har bir "provayder" — bitta checkout API'ga uzatiladigan qiymat. Shu sabab
+# har bir to'lov tizimi uchun alohida integratsiya yozish kerak emas.
+#
+# Env nomlari: asosiy (qisqa) nomlar Railway'da odatda shunday qo'yiladi;
+# PAYLOV_ prefiksli muqobil nomlar ham qo'llab-quvvatlanadi.
+def _normalize_api_base(url: str) -> str:
+    """
+    To'lov API bazaviy URL'ini normallashtiradi.
+
+    Klient (core/services/paylov.py) yo'lga doim '/api/v1' prefiksini qo'shadi,
+    shuning uchun bazaviy URL faqat HOST bo'lishi kerak (masalan
+    https://api.wlcm.uz). Agar env'ga '/api/v1' (yoki '/api') qo'shib qo'yilgan
+    bo'lsa — olib tashlaymiz, aks holda yo'l '/api/v1/api/v1/...' bo'lib 404 beradi.
+    """
+    url = (url or "").strip().rstrip("/")
+    for suffix in ("/api/v1", "/api"):
+        if url.lower().endswith(suffix):
+            url = url[: -len(suffix)].rstrip("/")
+            break
+    return url
+
+
+PAYLOV_BASE_URL = _normalize_api_base(
+    os.getenv("Base_URL")
+    or os.getenv("PAYLOV_BASE_URL")
+    or "https://api.wlcm.uz"
+)
+PAYLOV_API_KEY = (os.getenv("API_KEY") or os.getenv("PAYLOV_API_KEY", "") or "").strip()
+PAYLOV_API_SECRET = (os.getenv("API_SECRET") or os.getenv("PAYLOV_API_SECRET", "") or "").strip()
+PAYLOV_PARTNER_ID = (os.getenv("PARTNER_ID") or os.getenv("PAYLOV_PARTNER_ID", "") or "").strip()
+
+# Webhook imzo maxfiy kaliti (WLCM webhookni ulagandan keyin beradi).
+# Webhook haqiqatan WLCM'dan kelganini HMAC-SHA256 orqali tasdiqlash uchun.
+# XAVFSIZLIK: bo'sh bo'lsa webhook RAD ETILADI (soxta "to'landi" xabari bilan
+# buyurtmani to'langan qilib bo'lmasligi uchun).
+PAYLOV_WEBHOOK_SECRET = (os.getenv("PAYLOV_WEBHOOK_SECRET", "") or "").strip()
+
+# Mijoz tanlamasa ishlatiladigan default provayder.
+PAYLOV_PROVIDER = (os.getenv("PAYLOV_PROVIDER", "paylov") or "paylov").strip().lower()
+
+# To'lov oynasida mijozga ko'rsatiladigan provayderlar (tugma sifatida).
+# Eslatma: 'card' bu yerga KIRITILMAYDI — u alohida OTP oqimini talab qiladi
+# (checkout_url emas, balki transaction_id + OTP). Faqat redirect-checkout
+# provayderlari ko'rsatiladi.
+_VALID_PAYMENT_PROVIDERS = {"payme", "click", "uzum", "paylov"}
+PAYLOV_PROVIDERS = [
+    p.strip().lower()
+    for p in (os.getenv("PAYLOV_PROVIDERS", "payme,click,uzum,paylov") or "").split(",")
+    if p.strip().lower() in _VALID_PAYMENT_PROVIDERS
+] or ["paylov"]
+
+# Mijozning bot username'i (to'lovdan keyin qaytish havolasi uchun). '@' siz.
+# Bo'sh bo'lsa bot ishga tushganda Telegram'dan avtomatik olinadi.
+CUSTOMER_BOT_USERNAME = (os.getenv("BOT_CUSTOMER_USERNAME", "") or "").strip().lstrip("@")
+
+# To'lovdan keyin mijoz qaytariladigan URL. Bo'sh bo'lsa bot havolasi (username
+# aniqlangach) yoki Mini App domeni ishlatiladi.
+PAYLOV_RETURN_URL = (os.getenv("PAYLOV_RETURN_URL", "") or "").strip()
+
+# To'lov tizimi sozlanganmi (kalitlar bormi).
+PAYLOV_ENABLED = bool(PAYLOV_API_KEY and PAYLOV_API_SECRET)
+
+# SINOV rejimi: kalitlar YO'Q bo'lsa, onlayn provayder tanlanishi bilan buyurtma
+# "to'langan" deb belgilanadi (haqiqiy pul o'tmaydi). Faqat demo/sinov uchun!
+# Ishlab chiqarishda MUTLAQO false bo'lishi kerak — aks holda har kim bepul
+# buyurtma bera oladi. Kalitlar mavjud bo'lsa bu sozlama e'tiborga olinmaydi.
+PAYMENT_TEST_MODE = (
+    os.getenv("PAYMENT_TEST_MODE", "false").strip().lower() in ("1", "true", "yes")
+)
+
+# Naqd (yetkazishda) to'lovni ko'rsatishmi. Ba'zi do'konlar faqat oldindan
+# to'lovni qabul qiladi — u holda PAYMENT_ALLOW_CASH=false qo'yiladi.
+PAYMENT_ALLOW_CASH = (
+    os.getenv("PAYMENT_ALLOW_CASH", "true").strip().lower() in ("1", "true", "yes")
+)
+
+
+# ── Soliq cheki (fiscalization / OFD) — ixtiyoriy ──
+def _to_int(val, default: int = 0) -> int:
+    try:
+        return int(str(val).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+PAYLOV_FISCAL_ENABLED = (
+    os.getenv("PAYLOV_FISCAL_ENABLED", "false").strip().lower() in ("1", "true", "yes")
+)
+# IKPU/MXIK mahsulot kodi (sut mahsulotlari uchun soliq kodi).
+PAYLOV_FISCAL_MXIK = (os.getenv("PAYLOV_FISCAL_MXIK", "") or "").strip()
+PAYLOV_FISCAL_PACKAGE_CODE = (os.getenv("PAYLOV_FISCAL_PACKAGE_CODE", "") or "").strip()
+PAYLOV_FISCAL_VAT_PERCENT = _to_int(os.getenv("PAYLOV_FISCAL_VAT_PERCENT", "0"), 0)
+
+
+# ── Webhook manzili (WLCM shu manzilga to'lov natijasini yuboradi) ──
+PAYLOV_WEBHOOK_PATH = "/webhook/paylov"
+PAYLOV_WEBHOOK_URL = (
+    f"{PUBLIC_BASE_URL}{PAYLOV_WEBHOOK_PATH}" if PUBLIC_BASE_URL else PAYLOV_WEBHOOK_PATH
+)

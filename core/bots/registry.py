@@ -16,10 +16,19 @@ customer_bot: Optional["Bot"] = None
 admin_bot: Optional["Bot"] = None
 superadmin_bot: Optional["Bot"] = None
 
+# Sotuv botining username'i ('@' siz). To'lovdan keyin mijozni botga qaytarish
+# havolasini (https://t.me/<username>) yasash uchun ishlatiladi.
+customer_bot_username: str = ""
+
 
 def set_customer_bot(bot: "Bot") -> None:
     global customer_bot
     customer_bot = bot
+
+
+def set_customer_bot_username(username: str) -> None:
+    global customer_bot_username
+    customer_bot_username = (username or "").lstrip("@")
 
 
 def set_admin_bot(bot: "Bot") -> None:

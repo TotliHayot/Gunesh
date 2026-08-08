@@ -4,9 +4,14 @@ Buyurtma API.
 Oqim:
   1. Mini App savatni + manzilni (Yandex xarita) yuboradi → POST /api/orders
      buyurtmani YARATADI (hali to'lanmagan) va savat tozalanadi.
-  2. Server adminlarga yangi buyurtma haqida xabar beradi.
-  3. Server mijozga Sotuv bot orqali "💳 To'lov qilish" tugmali xabar yuboradi.
-  4. Mijoz botga o'tib to'lovni amalga oshiradi (Click/Uzum/Payme/Paylov).
+  2. Server mijozga Sotuv bot orqali "💳 To'lov qilish" tugmali xabar yuboradi.
+  3. Mijoz botda to'lov usulini tanlaydi (Payme/Click/Uzum/Paylov yoki naqd).
+  4. Onlayn to'lov TASDIQLANGANDAN so'ng (webhook) yoki naqd tanlanganda
+     buyurtma adminlarga yuboriladi — `core/bots/customer/order_flow.py` va
+     `core/services/payment_service.py`.
+
+DIQQAT: adminlarga bu yerda xabar berilMAYDI. Aks holda to'lanmagan (va ehtimol
+hech qachon to'lanmaydigan) buyurtmalar admin botni to'ldirib tashlaydi.
 """
 from __future__ import annotations
 

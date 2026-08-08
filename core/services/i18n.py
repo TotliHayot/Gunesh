@@ -183,6 +183,105 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
     },
     "dtype_delivery": {"uz": "🚚 Yetkazib berish", "ru": "🚚 Доставка", "en": "🚚 Delivery"},
     "dtype_pickup": {"uz": "🏃 Olib ketish", "ru": "🏃 Самовывоз", "en": "🏃 Pickup"},
+
+    # ── Onlayn to'lov (Payme / Click / Uzum / Paylov) ──
+    "choose_provider_total": {
+        "uz": "🧾 Buyurtma #{number}\nTo'lov summasi: <b>{total}</b>\n\nTo'lov usulini tanlang 👇",
+        "ru": "🧾 Заказ #{number}\nК оплате: <b>{total}</b>\n\nВыберите способ оплаты 👇",
+        "en": "🧾 Order #{number}\nTotal: <b>{total}</b>\n\nChoose a payment method 👇",
+    },
+    "payment_ready": {
+        "uz": (
+            "💳 <b>To'lovga tayyor</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            "🧾 Buyurtma: <b>#{number}</b>\n"
+            "🏦 To'lov usuli: <b>{provider}</b>\n"
+            "💰 Summa: <b>{total}</b>\n\n"
+            "Quyidagi tugma orqali to'lovni yakunlang. To'lov o'tgach buyurtmangiz "
+            "<b>avtomatik</b> qabul qilinadi va sizga xabar keladi 🔔"
+        ),
+        "ru": (
+            "💳 <b>Готово к оплате</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            "🧾 Заказ: <b>#{number}</b>\n"
+            "🏦 Способ оплаты: <b>{provider}</b>\n"
+            "💰 Сумма: <b>{total}</b>\n\n"
+            "Завершите оплату по кнопке ниже. После оплаты заказ будет принят "
+            "<b>автоматически</b>, и вы получите уведомление 🔔"
+        ),
+        "en": (
+            "💳 <b>Ready to pay</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            "🧾 Order: <b>#{number}</b>\n"
+            "🏦 Payment method: <b>{provider}</b>\n"
+            "💰 Amount: <b>{total}</b>\n\n"
+            "Complete the payment using the button below. Once paid, your order is "
+            "accepted <b>automatically</b> and you will be notified 🔔"
+        ),
+    },
+    "btn_pay_via": {
+        "uz": "💳 {provider} orqali to'lash",
+        "ru": "💳 Оплатить через {provider}",
+        "en": "💳 Pay with {provider}",
+    },
+    "btn_check_payment": {
+        "uz": "🔄 To'lovni tekshirish",
+        "ru": "🔄 Проверить оплату",
+        "en": "🔄 Check payment",
+    },
+    "btn_other_method": {
+        "uz": "⬅️ Boshqa to'lov usuli",
+        "ru": "⬅️ Другой способ оплаты",
+        "en": "⬅️ Another payment method",
+    },
+    "payment_pending": {
+        "uz": (
+            "⏳ To'lov hali tasdiqlanmadi.\n\n"
+            "Agar to'lovni amalga oshirgan bo'lsangiz, bir necha soniyadan so'ng "
+            "qayta tekshirib ko'ring — tasdiq avtomatik keladi."
+        ),
+        "ru": (
+            "⏳ Оплата пока не подтверждена.\n\n"
+            "Если вы уже оплатили, проверьте снова через несколько секунд — "
+            "подтверждение придёт автоматически."
+        ),
+        "en": (
+            "⏳ Payment is not confirmed yet.\n\n"
+            "If you have already paid, check again in a few seconds — the "
+            "confirmation arrives automatically."
+        ),
+    },
+    "payment_error": {
+        "uz": "To'lov sahifasini ochib bo'lmadi. Birozdan so'ng qayta urinib ko'ring yoki naqd to'lovni tanlang.",
+        "ru": "Не удалось открыть страницу оплаты. Попробуйте позже или выберите оплату наличными.",
+        "en": "Could not open the payment page. Please try again later or choose cash payment.",
+    },
+    "payment_canceled": {
+        "uz": (
+            "❌ To'lov bekor qilindi.\n"
+            "Buyurtma #{number} hali to'lanmagan. Quyidagi tugma orqali qayta "
+            "urinib ko'rishingiz mumkin 👇"
+        ),
+        "ru": (
+            "❌ Оплата отменена.\n"
+            "Заказ #{number} ещё не оплачен. Вы можете попробовать снова по "
+            "кнопке ниже 👇"
+        ),
+        "en": (
+            "❌ Payment canceled.\n"
+            "Order #{number} is not paid yet. You can try again using the button below 👇"
+        ),
+    },
+    "online_payment_off": {
+        "uz": "ℹ️ Onlayn to'lov hozircha mavjud emas. Naqd (yetkazishda) to'lovni tanlashingiz mumkin.",
+        "ru": "ℹ️ Онлайн-оплата пока недоступна. Вы можете выбрать оплату наличными при доставке.",
+        "en": "ℹ️ Online payment is currently unavailable. You can choose cash on delivery.",
+    },
+    "no_payment_methods": {
+        "uz": "To'lov usullari sozlanmagan. Iltimos, operator bilan bog'laning.",
+        "ru": "Способы оплаты не настроены. Пожалуйста, свяжитесь с оператором.",
+        "en": "No payment methods are configured. Please contact the operator.",
+    },
 }
 
 # Mahsulot ro'yxatidagi status nomlari (admin/super admin uchun ham qulay).

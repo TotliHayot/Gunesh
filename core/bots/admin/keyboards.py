@@ -24,6 +24,7 @@ BTN_NEW_ORDERS = "🔥 Faol buyurtmalar"
 BTN_ALL_ORDERS = "🧾 Barcha buyurtmalar"
 BTN_STATS = "📊 Statistika"
 BTN_FIND = "🔎 Buyurtma qidirish"
+BTN_PAYMENT = "💳 To'lovni tasdiqlash"
 BTN_HELP = "🆘 Yordam"
 
 BTN_CANCEL_SKIP = "⏭ Sababsiz bekor qilish"
@@ -82,7 +83,8 @@ def main_menu() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text=BTN_NEW_ORDERS)],
             [KeyboardButton(text=BTN_ALL_ORDERS), KeyboardButton(text=BTN_STATS)],
-            [KeyboardButton(text=BTN_FIND), KeyboardButton(text=BTN_HELP)],
+            [KeyboardButton(text=BTN_FIND), KeyboardButton(text=BTN_PAYMENT)],
+            [KeyboardButton(text=BTN_HELP)],
         ],
         resize_keyboard=True,
         input_field_placeholder="Buyurtma raqami yoki /help",
