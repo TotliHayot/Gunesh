@@ -2098,6 +2098,25 @@ _PAY_FIELDS = {
 }
 
 
+def _db_status_line() -> str:
+    """Bazadan kalit o'qish holati — HAR DOIM ko'rsatiladi.
+
+    Muhim: baza o'qilmasa kalitlarni saqlash ham ishlamaydi (bot orqali
+    kiritilgan qiymat yo'qoladi). Shu sabab bu holat kalitlar env'dan
+    ishlayotgan paytda ham ko'rinishi kerak.
+    """
+    from core.services import payment_keys
+
+    db_ok, db_count, db_err = payment_keys.load_status()
+    if db_ok:
+        empty = "" if db_count else " <i>(bo'sh)</i>"
+        return f"🗄 Baza: o'qildi ✅ — saqlangan qiymatlar: <b>{db_count} ta</b>{empty}"
+    return (
+        "🗄 Baza: ❗️ <b>o'qib bo'lmadi</b> — bot orqali kiritilgan kalitlar "
+        f"SAQLANMAYDI (faqat env ishlaydi)\n<code>{esc(db_err or 'sabab aniqlanmadi')}</code>"
+    )
+
+
 async def _payments_text() -> str:
     from core.config import (
         PAYLOV_BASE_URL, PAYLOV_PROVIDERS, PAYLOV_WEBHOOK_URL,
@@ -2143,6 +2162,7 @@ async def _payments_text() -> str:
         f"📡 Webhook secret: <code>{esc(payment_keys.mask(payment_keys.webhook_secret()))}</code>"
         f"{_src('webhook_secret')}"
         f"{'' if hook_ready else ' <i>(API_SECRET bilan tekshiriladi)</i>'}",
+        _db_status_line(),
         "",
         "📡 <b>Webhook manzili</b> — WLCM kabinetiga shuni bering:",
     ]
@@ -2190,22 +2210,6 @@ async def _payments_text() -> str:
             "sarflaydi — faqat <b>bir marta</b> bosing va kalitlarni darhol "
             "Railway env'ga qo'ying.",
         ]
-        # Diagnostika: baza o'qildimi va unda nechta qiymat bor.
-        db_ok, db_count, db_err = payment_keys.load_status()
-        if db_ok:
-            lines += [
-                "",
-                f"🗄 Baza o'qildi ✅ — saqlangan qiymatlar: <b>{db_count} ta</b>"
-                + ("" if db_count else " <i>(bo'sh)</i>"),
-            ]
-        else:
-            lines += [
-                "",
-                "🗄 ❗️ <b>Bazani o'qib bo'lmadi</b> — kalitlar saqlanmaydi.",
-                f"<code>{esc(db_err or 'sabab aniqlanmadi')}</code>",
-                "Bu holatda faqat env'dagi qiymatlar ishlaydi.",
-            ]
-
         if not has_token:
             lines += [
                 "",
@@ -2528,85 +2532,239 @@ async def payments_check_token(callback: CallbackQuery):
     )
 
 
+# Onboarding BIR MARTALIK bo'lgani uchun ikki marta boshlanib qolmasligi kerak
+# (masalan admin tugmani ikki marta bossa) — aks holda token behuda sarflanadi.
+_onboarding_lock = asyncio.Lock()
+_onboarding_busy = False
+
+
+async def _try_send(callback: CallbackQuery, text: str, markup=None) -> bool:
+    """Xabar yuboradi, xato bo'lsa jim o'tadi (jarayonni to'xtatmaydi).
+
+    Onboarding oxiridagi yo'riqnoma xabarlari uchun: ular yuborilmasa ham
+    kalitlar allaqachon saqlangan bo'ladi, shuning uchun xato butun amalni
+    buzmasligi kerak.
+    """
+    try:
+        await callback.message.answer(text, reply_markup=markup)
+        return True
+    except Exception as e:
+        logger.warning("Xabar yuborilmadi: %s", e)
+        return False
+
+
+async def _send_keys_message(callback: CallbackQuery, api_key: str, api_secret: str) -> bool:
+    """Kalitlarni chatga yuboradi (3 marta urinadi). Muvaffaqiyatni qaytaradi.
+
+    Token bir martalik bo'lgani uchun bu xabar ENG MUHIM: bazaga yozish
+    muvaffaqiyatsiz bo'lsa ham, admin qiymatlarni chatdan nusxa olib qoladi.
+    """
+    text = (
+        f"<code>API_KEY={esc(api_key)}</code>\n\n"
+        f"<code>API_SECRET={esc(api_secret)}</code>"
+    )
+    for attempt in range(3):
+        try:
+            await callback.message.answer(text)
+            return True
+        except Exception as e:
+            logger.error("Kalitlar xabarini yuborib bo'lmadi (urinish %s): %s", attempt + 1, e)
+            await asyncio.sleep(1)
+    return False
+
+
 @router.callback_query(F.data == "pay:gen")
 async def payments_generate(callback: CallbackQuery):
-    """Tokenni SARFLAB api_key/api_secret oladi va bazaga saqlaydi."""
+    """
+    Tokenni SARFLAB api_key/api_secret oladi, chatga yuboradi va bazaga saqlaydi.
+
+    ⚠️ Token BIR MARTALIK — bu funksiyaning muvaffaqiyatsizligi kalitlarning
+    BUTUNLAY yo'qolishiga olib kelishi mumkin. Shu sabab:
+
+      1. Ikki marta ishga tushmasligi uchun qulf (lock + busy flag).
+      2. Tokenni sarflashdan OLDIN GET bilan tekshiriladi — yaroqsiz bo'lsa
+         token sarflanmaydi.
+      3. Kalitlar olingach ikki yo'l bilan MUSTAQIL saqlanadi: chatga yuborish
+         va bazaga yozish. Biri yiqilsa ikkinchisi baribir bajariladi
+         (avval chatga — admin uchun eng muhim nusxa).
+      4. Ikkalasi ham yiqilsa — oxirgi chora sifatida qiymatlar server LOGIGA
+         yoziladi (Railway loglari faqat loyiha egasiga ko'rinadi). Bu ataylab:
+         alternativa — kalitlarning butunlay yo'qolishi va yangi token so'rash.
+    """
+    global _onboarding_busy
     from core.config import PAYLOV_WEBHOOK_URL
     from core.services import payment_keys, settings_service
-    from core.services.paylov_onboarding import OnboardingError, onboard_and_save
+    from core.services.paylov_onboarding import (
+        OnboardingError, complete_onboarding, validate_token,
+    )
 
     await payment_keys.ensure_loaded(force=True)
     if payment_keys.enabled():
         await callback.answer("Kalitlar allaqachon o'rnatilgan.", show_alert=True)
         return
-
-    await callback.answer("🔑 Kalitlar yaratilmoqda…")
-    await _edit(callback, "⏳ WLCM bilan bog'lanilmoqda…")
-
-    shop = (await settings_service.get("shop_name", "") or "gunesh").strip()
-    # Kalit nomi sifatida do'kon nomidan xavfsiz slug yasaymiz.
-    slug = "".join(ch if ch.isalnum() else "-" for ch in shop.lower()).strip("-") or "gunesh"
-
-    try:
-        info = await onboard_and_save(name=f"{slug[:24]}-prod")
-    except OnboardingError as e:
-        await _edit(
-            callback,
-            "🔑 <b>API kalitlarini olish</b>\n\n"
-            f"❌ Xatolik:\n<code>{esc(str(e)[:500])}</code>\n\n"
-            "Token amaldaligini «🔍 Tokenni tekshirish» bilan tasdiqlang yoki "
-            "WLCM bilan bog'laning.",
-            kb.payments_back_kb(),
+    if not payment_keys.prod_token():
+        await callback.answer(
+            "Token yo'q. Railway env'da PROD_TOKEN ni to'ldiring yoki botga kiriting.",
+            show_alert=True,
         )
         return
-    except Exception as e:
-        logger.exception("Onboardingda kutilmagan xato: %s", e)
-        await _edit(
-            callback,
-            f"🔑 <b>API kalitlarini olish</b>\n\n❌ Kutilmagan xato: "
-            f"<code>{esc(str(e)[:300])}</code>",
-            kb.payments_back_kb(),
+    if _onboarding_busy:
+        await callback.answer(
+            "⏳ Jarayon allaqachon ketmoqda — kutib turing, ikki marta bosmang!",
+            show_alert=True,
         )
         return
 
-    # ── Kalitlarni NUSXALASH uchun qulay ko'rinishda yuboramiz ──
-    # Onboarding tokeni bir martalik, shuning uchun kalitlar bazaga saqlangan
-    # bo'lsa ham ularni Railway env'ga ko'chirib qo'yish MUHIM (baza qayta
-    # yaratilsa yo'qolmasin). Har bir qiymat alohida <code> blokda — Telegram'da
-    # bir bosishda nusxa olinadi.
-    await _edit(
-        callback,
-        "✅ <b>Kalitlar yaratildi va saqlandi!</b>\n\n"
-        f"🆔 Key ID: <code>{esc(str(info.get('id', '—')))}</code>\n"
-        f"🏷 Nomi: <code>{esc(str(info.get('name', '—')))}</code>\n\n"
-        "Kalitlar bazaga yozildi — <b>hozircha ishlaydi</b>, redeploy shart emas.\n"
-        "⬇️ Quyidagilarni <b>Railway Variables</b>'ga ham qo'ying (zaxira uchun).",
-    )
-    await callback.message.answer(
-        f"<code>API_KEY={esc(payment_keys.api_key())}</code>\n\n"
-        f"<code>API_SECRET={esc(payment_keys.api_secret())}</code>"
-    )
-    await callback.message.answer(
-        "📌 <b>Keyingi qadamlar</b>\n\n"
-        "1️⃣ Yuqoridagi <code>API_KEY</code> va <code>API_SECRET</code> ni Railway → "
-        "Variables ga qo'shing (nusxa olish uchun qiymat ustiga bosing).\n"
-        "2️⃣ Webhook manzilini Paylov/WLCM'ga bering:\n"
-        f"<code>{esc(PAYLOV_WEBHOOK_URL)}</code>\n"
-        "3️⃣ Kichik summa bilan sinab ko'ring.\n\n"
-        "ℹ️ <b>Webhook secret haqida:</b> ko'p hollarda alohida secret kerak "
-        "emas — bot webhook imzosini <b>API_SECRET bilan ham</b> tekshirib "
-        "ko'radi. Agar provayder shu bilan imzolasa, to'lovlar <b>darhol "
-        "avtomatik</b> tasdiqlanadi. Ishlamasa, Paylov'dan alohida webhook "
-        "secret so'rab «🔐 Webhook secret» orqali kiritasiz.\n\n"
-        "⚠️ Bu kalitlarni hech kimga bermang. Nusxa olgach yuqoridagi xabarni "
-        "o'chirib tashlang — <code>API_SECRET</code> qayta ko'rsatilmaydi "
-        "(lekin «📤 Kalitlarni ko'rsatish» orqali olishingiz mumkin).",
-        reply_markup=kb.payments_back_kb(),
-    )
-    logger.warning(
-        "🔑 Onboarding bajarildi va kalitlar ko'rsatildi (superadmin=%s)",
-        callback.from_user.id,
-    )
+    async with _onboarding_lock:
+        # Qulf ichida qayta tekshiramiz (ikki bosish orasidagi poyga uchun).
+        if _onboarding_busy or payment_keys.enabled():
+            await callback.answer("⏳ Jarayon ketmoqda yoki kalitlar bor.", show_alert=True)
+            return
+        _onboarding_busy = True
+        try:
+            await callback.answer("🔑 Kalitlar yaratilmoqda…")
+            await _edit(callback, "⏳ Token tekshirilmoqda…")
+
+            # ── 1. Tokenni tekshiramiz — SARFLAMAYDI ──
+            # Yaroqsiz bo'lsa shu yerda to'xtaymiz va token butun qoladi.
+            try:
+                path, _info = await validate_token()
+            except OnboardingError as e:
+                await _edit(
+                    callback,
+                    "🔑 <b>API kalitlarini olish</b>\n\n"
+                    f"❌ Token yaroqsiz:\n<code>{esc(str(e)[:500])}</code>\n\n"
+                    "ℹ️ Token <b>sarflanmadi</b>.",
+                    kb.payments_back_kb(),
+                )
+                return
+            except Exception as e:
+                logger.exception("Token tekshirishda kutilmagan xato: %s", e)
+                await _edit(
+                    callback,
+                    "🔑 <b>API kalitlarini olish</b>\n\n"
+                    f"❌ Kutilmagan xato: <code>{esc(str(e)[:300])}</code>\n\n"
+                    "ℹ️ Token <b>sarflanmadi</b>, qayta urinib ko'rishingiz mumkin.",
+                    kb.payments_back_kb(),
+                )
+                return
+
+            shop = (await settings_service.get("shop_name", "") or "gunesh").strip()
+            slug = "".join(ch if ch.isalnum() else "-" for ch in shop.lower()).strip("-")
+            key_name = f"{(slug or 'gunesh')[:24]}-prod"
+
+            # ── 2. TOKEN SHU YERDA SARFLANADI ──
+            await _edit(callback, "⏳ Kalitlar yaratilmoqda… (tokeningiz sarflanadi)")
+            try:
+                data = await complete_onboarding(name=key_name, path=path)
+            except OnboardingError as e:
+                await _edit(
+                    callback,
+                    "🔑 <b>API kalitlarini olish</b>\n\n"
+                    f"❌ Xatolik:\n<code>{esc(str(e)[:500])}</code>",
+                    kb.payments_back_kb(),
+                )
+                return
+            except Exception as e:
+                logger.exception("Onboardingda kutilmagan xato: %s", e)
+                await _edit(
+                    callback,
+                    "🔑 <b>API kalitlarini olish</b>\n\n"
+                    f"❌ Kutilmagan xato: <code>{esc(str(e)[:300])}</code>\n\n"
+                    "⚠️ Token sarflangan bo'lishi mumkin. Paylov'dan holatni "
+                    "so'rab aniqlang.",
+                    kb.payments_back_kb(),
+                )
+                return
+
+            api_key = str(data.get("api_key") or "")
+            api_secret = str(data.get("api_secret") or "")
+            logger.warning(
+                "🔑 Onboarding muvaffaqiyatli: key_id=%s nomi=%s (qiymatlar yozilmadi)",
+                data.get("id"), data.get("name"),
+            )
+
+            # ── 3. Kalitlarni saqlash — IKKI MUSTAQIL YO'L ──
+            # Avval CHATGA (admin uchun eng muhim nusxa), keyin BAZAGA.
+            tg_ok = await _send_keys_message(callback, api_key, api_secret)
+
+            db_ok = False
+            try:
+                await payment_keys.save_api_keys(api_key, api_secret)
+                await payment_keys.ensure_loaded(force=True)
+                db_ok = payment_keys.enabled()
+            except Exception as e:
+                logger.error("❌ Kalitlarni bazaga saqlab bo'lmadi: %s", e)
+
+            # ── 4. Ikkalasi ham yiqilgan bo'lsa — oxirgi chora ──
+            if not tg_ok and not db_ok:
+                # Ataylab: aks holda kalitlar BUTUNLAY yo'qoladi va yangi token
+                # kerak bo'ladi. Railway loglari faqat loyiha egasiga ko'rinadi.
+                logger.critical(
+                    "🚨 KALITLARNI NA CHATGA, NA BAZAGA SAQLAB BO'LMADI! "
+                    "Oxirgi chora — qiymatlarni shu yerdan olib env'ga qo'ying: "
+                    "API_KEY=%s API_SECRET=%s", api_key, api_secret,
+                )
+
+            # ── 5. Natijani ANIQ aytamiz ──
+            if db_ok and tg_ok:
+                head = (
+                    "✅ <b>Kalitlar yaratildi!</b>\n\n"
+                    "Bazaga saqlandi ✅ — <b>hozircha ishlaydi</b>, redeploy shart emas.\n"
+                    "Yuqoridagi xabardan nusxa olib <b>Railway Variables</b>'ga ham "
+                    "qo'ying (zaxira uchun)."
+                )
+            elif tg_ok and not db_ok:
+                head = (
+                    "⚠️ <b>Kalitlar yaratildi, LEKIN bazaga saqlanmadi!</b>\n\n"
+                    "Yuqoridagi qiymatlarni <b>ALBATTA hoziroq</b> Railway → "
+                    "Variables ga qo'ying — aks holda ular yo'qoladi va yangi "
+                    "token kerak bo'ladi.\n"
+                    "Baza holatini pastdagi panelda ko'rishingiz mumkin."
+                )
+            elif db_ok and not tg_ok:
+                head = (
+                    "⚠️ <b>Kalitlar yaratildi va bazaga saqlandi, lekin xabar "
+                    "yuborilmadi.</b>\n\n"
+                    "Qiymatlarni <b>«📤 Kalitlarni ko'rsatish (env uchun)»</b> "
+                    "tugmasi orqali oling va Railway Variables'ga qo'ying."
+                )
+            else:
+                head = (
+                    "🚨 <b>Kalitlar yaratildi, lekin saqlab bo'lmadi!</b>\n\n"
+                    "Railway <b>loglarini</b> darhol ochib, "
+                    "<code>API_KEY=… API_SECRET=…</code> yozilgan qatorni topib "
+                    "Variables'ga qo'ying. Bu qiymatlar qayta ko'rsatilmaydi."
+                )
+
+            await _edit(
+                callback,
+                f"{head}\n\n"
+                f"🆔 Key ID: <code>{esc(str(data.get('id', '—')))}</code>\n"
+                f"🏷 Nomi: <code>{esc(str(data.get('name', '—')))}</code>",
+            )
+            # Yakuniy yo'riqnoma — yuborilmasa ham jarayon muvaffaqiyatli
+            # hisoblanadi (kalitlar allaqachon saqlangan/ko'rsatilgan).
+            await _try_send(
+                callback,
+                "📌 <b>Keyingi qadamlar</b>\n\n"
+                "1️⃣ <code>API_KEY</code> va <code>API_SECRET</code> ni Railway → "
+                "Variables ga qo'shing (nusxa olish uchun qiymat ustiga bosing).\n"
+                "2️⃣ Webhook manzilini Paylov/WLCM'ga bering:\n"
+                f"<code>{esc(PAYLOV_WEBHOOK_URL)}</code>\n"
+                "3️⃣ Kichik summa bilan sinab ko'ring.\n\n"
+                "ℹ️ <b>Webhook secret haqida:</b> ko'p hollarda alohida secret "
+                "kerak emas — bot webhook imzosini <b>API_SECRET bilan ham</b> "
+                "tekshiradi. Provayder shu bilan imzolasa to'lovlar <b>darhol "
+                "avtomatik</b> tasdiqlanadi. Ishlamasa, Paylov'dan alohida "
+                "webhook secret so'rab «🔐 Webhook secret» orqali kiritasiz.\n\n"
+                "⚠️ Kalitlarni hech kimga bermang. Nusxa olgach kalitli xabarni "
+                "o'chirib tashlang — kerak bo'lsa «📤 Kalitlarni ko'rsatish» "
+                "orqali qayta olasiz.",
+                kb.payments_back_kb(),
+            )
+        finally:
+            _onboarding_busy = False
 
 
 @router.callback_query(F.data == "pay:test")
