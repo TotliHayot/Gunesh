@@ -2152,6 +2152,15 @@ async def _payments_text() -> str:
         f"💳 Usullar: <b>{esc(', '.join(PAYLOV_PROVIDERS))}</b>",
         f"💵 Naqd to'lov: <b>{'yoqilgan' if PAYMENT_ALLOW_CASH else 'o‘chirilgan'}</b>",
     ]
+
+    # Kalitlar faqat bazada bo'lsa — zaxira nusxa olishni eslatamiz.
+    if keys_ready and payment_keys.source("api_key") == "bot":
+        lines += [
+            "",
+            "💾 <i>Kalitlar bazada saqlangan. Onboarding tokeni bir martalik "
+            "bo'lgani uchun ularni <b>«📤 Kalitlarni ko'rsatish»</b> orqali "
+            "Railway env'ga ham ko'chirib qo'yish tavsiya etiladi (zaxira).</i>",
+        ]
     if PAYMENT_TEST_MODE and not keys_ready:
         lines += [
             "",
@@ -2192,10 +2201,14 @@ async def _payments_text() -> str:
 
 async def _payments_markup():
     from core.services import payment_keys
+    # Bazada saqlangan (env'da bo'lmagan) kalitlar bormi — ularni env uchun
+    # ko'rsatish tugmasini shunda chiqaramiz.
+    has_db_keys = any(payment_keys.source(k) == "bot" for k in payment_keys.KEYS)
     return kb.payments_kb(
         keys_ready=payment_keys.enabled(),
         has_token=bool(payment_keys.prod_token()),
         hook_ready=payment_keys.webhook_ready(),
+        has_db_keys=has_db_keys,
     )
 
 
@@ -2229,6 +2242,92 @@ async def payments_ask_token(callback: CallbackQuery, state: FSMContext):
         reply_markup=kb.cancel_menu(),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "pay:pid")
+async def payments_ask_pid(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(PaymentSetup.value)
+    await state.update_data(field="partner_id")
+    await callback.message.answer(
+        "🏷 <b>Partner ID</b>\n\n"
+        "Bu qiymat integratsiya uchun <b>kerak emas</b> — autentifikatsiya faqat "
+        "API kalit va imzo orqali bo'ladi. U faqat ma'lumot uchun ko'rsatiladi "
+        "(provayder bilan yozishganda qulay).\n\n"
+        "Odatda «🔌 Ulanishni tekshirish» tugmasi uni <b>avtomatik</b> saqlaydi. "
+        "Xohlasangiz qo'lda yuborishingiz ham mumkin.",
+        reply_markup=kb.cancel_menu(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "pay:export")
+async def payments_export(callback: CallbackQuery):
+    """Bazadagi kalitlarni Railway env formatida ko'rsatadi (zaxira nusxa uchun).
+
+    NEGA KERAK: onboarding tokeni BIR MARTALIK. Agar baza qayta yaratilsa
+    (Railway Postgres almashtirilsa, reset qilinsa), bazadagi kalitlar yo'qoladi
+    va yangi kalit olish uchun WLCM'dan YANGI token so'rash kerak bo'ladi.
+    Env'da nusxa bo'lsa — bu xavf yo'q. Env qiymati bazadan ustun turadi,
+    shuning uchun ko'chirgandan keyin panel manbani «env» deb ko'rsatadi.
+    """
+    from core.services import payment_keys
+
+    await payment_keys.ensure_loaded(force=True)
+
+    # Faqat BAZADA saqlangan qiymatlarni ko'rsatamiz (env'dagilar allaqachon env'da).
+    env_names = {
+        "api_key": "API_KEY",
+        "api_secret": "API_SECRET",
+        "webhook_secret": "PAYLOV_WEBHOOK_SECRET",
+        "prod_token": "PROD_TOKEN",
+        "partner_id": "PARTNER_ID",
+    }
+    getters = {
+        "api_key": payment_keys.api_key,
+        "api_secret": payment_keys.api_secret,
+        "webhook_secret": payment_keys.webhook_secret,
+        "prod_token": payment_keys.prod_token,
+        "partner_id": payment_keys.partner_id,
+    }
+    lines = [
+        f"{env_names[k]}={getters[k]()}"
+        for k in env_names
+        if payment_keys.source(k) == "bot" and getters[k]()
+    ]
+
+    if not lines:
+        await callback.answer(
+            "Bazada saqlangan kalit yo'q (hammasi env'da).", show_alert=True
+        )
+        return
+
+    await callback.answer()
+    await _edit(
+        callback,
+        "📤 <b>Kalitlarni env'ga ko'chirish</b>\n\n"
+        "⚠️ <b>Nega buni qilish tavsiya etiladi:</b>\n"
+        "Onboarding tokeni <b>bir martalik</b>. Agar baza qayta yaratilsa "
+        "(Railway Postgres almashtirilsa yoki reset qilinsa), bazadagi kalitlar "
+        "yo'qoladi va yangi kalit olish uchun WLCM'dan <b>yangi token</b> so'rash "
+        "kerak bo'ladi. Env'da nusxa bo'lsa — bu xavf yo'q.\n\n"
+        "Quyidagi xabardan nusxa olib Railway → Variables ga qo'shing, "
+        "so'ng <b>xabarni o'chirib tashlang</b>.",
+        kb.payments_back_kb(),
+    )
+    # Kalitlarni ALOHIDA xabarda — bir bosishda nusxa olish uchun.
+    await callback.message.answer(
+        "\n\n".join(f"<code>{esc(line)}</code>" for line in lines),
+    )
+    await callback.message.answer(
+        "🔒 <b>Nusxa olgach shu xabarni o'chiring!</b>\n\n"
+        "Bu qiymatlarni hech kimga bermang. Env'ga qo'shgandan keyin "
+        "«🔄 Yangilash» tugmasini bosing — manba <code>(env)</code> "
+        "ga o'zgarishi kerak.",
+        reply_markup=kb.payments_back_kb(),
+    )
+    logger.warning(
+        "🔑 To'lov kalitlari env uchun ko'rsatildi (superadmin=%s)", callback.from_user.id
+    )
 
 
 @router.callback_query(F.data == "pay:hook")
