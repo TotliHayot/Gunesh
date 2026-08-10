@@ -2093,6 +2093,8 @@ _PAY_FIELDS = {
     "prod_token": ("🎫 WLCM tokeni", 8),
     "webhook_secret": ("🔐 Webhook secret", 8),
     "partner_id": ("🏷 Partner ID", 1),
+    "api_key": ("🔐 API key", 8),
+    "api_secret": ("🔑 API secret", 8),
 }
 
 
@@ -2284,6 +2286,30 @@ async def payments_ask_token(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+@router.callback_query(F.data.in_({"pay:apikey", "pay:apisecret"}))
+async def payments_ask_api_key(callback: CallbackQuery, state: FSMContext):
+    """API kalitlarini QO'LDA kiritish.
+
+    Kerak bo'ladigan holat: onboarding tokeni sarflangan (yoki yo'qolgan), lekin
+    Paylov `api_key`/`api_secret` ni to'g'ridan-to'g'ri yuborgan. U holda token
+    umuman kerak emas.
+    """
+    field = "api_key" if callback.data == "pay:apikey" else "api_secret"
+    label = "🔐 API key" if field == "api_key" else "🔑 API secret"
+    await state.set_state(PaymentSetup.value)
+    await state.update_data(field=field)
+    await callback.message.answer(
+        f"{label} <b>qiymatini yuboring</b>\n\n"
+        "Bu yo'l tokensiz sozlash uchun: agar onboarding tokeni sarflangan "
+        "bo'lsa yoki Paylov kalitlarni to'g'ridan-to'g'ri yuborgan bo'lsa.\n\n"
+        "⚠️ To'lov ishlashi uchun <b>ikkalasi</b> ham kiritilishi kerak "
+        "(<code>API key</code> va <code>API secret</code>).\n"
+        "Yuborgan xabaringiz xavfsizlik uchun avtomatik o'chiriladi.",
+        reply_markup=kb.cancel_menu(),
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data == "pay:pid")
 async def payments_ask_pid(callback: CallbackQuery, state: FSMContext):
     await state.set_state(PaymentSetup.value)
@@ -2434,6 +2460,15 @@ async def payments_value_received(message: Message, state: FSMContext):
             "\n\n✅ Endi to'lovlar <b>avtomatik tasdiqlanadi</b>. "
             "Kichik summa bilan sinab ko'rishni tavsiya qilamiz."
         )
+    elif field in ("api_key", "api_secret"):
+        if payment_keys.enabled():
+            note = (
+                "\n\n✅ Ikkala kalit ham bor — to'lov tizimi <b>yoqildi</b>.\n"
+                "Endi <b>«🔌 Ulanishni tekshirish»</b> bilan tasdiqlab ko'ring."
+            )
+        else:
+            missing = "API secret" if field == "api_key" else "API key"
+            note = f"\n\n⚠️ Endi <b>{missing}</b> ni ham kiriting — ikkalasi kerak."
     await message.answer(
         f"✅ Saqlandi: <b>{label}</b>\n"
         f"Qiymat: <code>{esc(payment_keys.mask(value))}</code>{note}",

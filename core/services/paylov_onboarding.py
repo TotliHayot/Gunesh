@@ -193,8 +193,13 @@ def _explain(resp: httpx.Response) -> str:
 
     known = {
         "invalid_or_expired": (
-            "Token noto'g'ri yoki muddati tugagan (yoki allaqachon sarflangan: "
-            "uses_left=0). WLCM'dan yangi token so'rang."
+            "Token yaroqsiz. Hujjat bo'yicha uch sabab bo'lishi mumkin: "
+            "(1) token ALLAQACHON SARFLANGAN (uses_left=0) — agar avval bir marta "
+            "kalit olgan bo'lsangiz, aynan shu; (2) muddati tugagan; "
+            "(3) qiymat noto'g'ri. "
+            "Yechim: Paylov'dan YANGI token so'rang, yoki ular yaratilgan "
+            "api_key/api_secret ni to'g'ridan-to'g'ri yuborishini so'rang — "
+            "u holda tokensiz ham sozlash mumkin."
         ),
         "ip_not_allowed": (
             "IP whitelist mos emas. WLCM'ga Railway serveringiz IP manzilini "
