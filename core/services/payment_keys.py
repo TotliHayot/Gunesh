@@ -125,8 +125,18 @@ def enabled() -> bool:
 
 
 def webhook_ready() -> bool:
-    """Webhook imzosini tekshirish mumkinmi (secret bormi)."""
+    """WLCM alohida bergan webhook secret sozlanganmi."""
     return bool(webhook_secret())
+
+
+def webhook_verifiable() -> bool:
+    """Webhook imzosini tekshirish uchun umuman kalit bormi.
+
+    Alohida `webhook_secret` bo'lmasa ham `api_secret` bilan tekshirib ko'rish
+    mumkin — ba'zi provayderlar webhookni aynan api_secret bilan imzolaydi
+    (`payment_service.verify_webhook_signature` ikkalasini ham sinaydi).
+    """
+    return bool(webhook_secret() or api_secret())
 
 
 # ── Yozish ──

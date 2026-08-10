@@ -2114,12 +2114,14 @@ async def _payments_text() -> str:
 
     if keys_ready and hook_ready:
         status = "🟢 <b>To'liq ishlayapti</b> — mijozlar onlayn to'lov qila oladi"
-    elif keys_ready and not hook_ready:
+    elif keys_ready:
+        # Alohida webhook secret yo'q, lekin api_secret bilan tekshirib ko'riladi.
         status = (
-            "🟡 <b>Yarim tayyor</b> — kalitlar bor, lekin webhook secret yo'q.\n"
-            "To'lov sahifasi ochiladi, ammo natija <b>avtomatik tasdiqlanmaydi</b> "
-            "(buyurtma to'lanmagan holatda qoladi va siz uni qo'lda tasdiqlashingiz "
-            "kerak bo'ladi)."
+            "🟢 <b>Ishlayapti</b> — mijozlar onlayn to'lov qila oladi.\n"
+            "ℹ️ Alohida webhook secret berilmagan, shu sabab bot webhook imzosini "
+            "<b>API_SECRET bilan</b> tekshiradi. Provayder shu bilan imzolasa — "
+            "to'lovlar avtomatik tasdiqlanadi. Aks holda buyurtma to'lanmagan "
+            "qoladi va bot sizga darhol xabar beradi (qo'lda tasdiqlaysiz)."
         )
     else:
         status = "🔴 <b>O'chiq</b> — mijozlarga faqat naqd to'lov ko'rsatiladi"
@@ -2135,7 +2137,9 @@ async def _payments_text() -> str:
         f"🎫 Token: <code>{esc(payment_keys.mask(payment_keys.prod_token()))}</code>{_src('prod_token')}",
         f"🔐 API key: <code>{esc(payment_keys.mask(payment_keys.api_key()))}</code>{_src('api_key')}",
         f"🔑 API secret: <code>{esc(payment_keys.mask(payment_keys.api_secret()))}</code>{_src('api_secret')}",
-        f"📡 Webhook secret: <code>{esc(payment_keys.mask(payment_keys.webhook_secret()))}</code>{_src('webhook_secret')}",
+        f"📡 Webhook secret: <code>{esc(payment_keys.mask(payment_keys.webhook_secret()))}</code>"
+        f"{_src('webhook_secret')}"
+        f"{'' if hook_ready else ' <i>(API_SECRET bilan tekshiriladi)</i>'}",
         "",
         "📡 <b>Webhook manzili</b> — WLCM kabinetiga shuni bering:",
     ]
@@ -2179,22 +2183,28 @@ async def _payments_text() -> str:
             "4️⃣ Webhook manzilini WLCM'ga bering, ular bergan <b>secret</b>ni kiriting.",
         ]
     elif not hook_ready:
-        # Aynan shu holatda nima qilish kerakligini ANIQ aytamiz.
+        # Kalitlar bor, alohida webhook secret yo'q — nima bo'lishini aytamiz.
         lines += [
             "",
-            "🔜 <b>Oxirgi qadam — webhook secret</b>",
-            "Webhook secret'ni o'zingiz yasay olmaysiz — uni <b>Paylov / WLCM "
-            "jamoasi beradi</b>. Ularga yozing:",
+            "🔜 <b>Sinovdan o'tkazing</b>",
+            "Webhook manzilini Paylov/WLCM'ga bergan bo'lsangiz, kichik summa "
+            "bilan bitta to'lov qilib ko'ring:",
             "",
-            "<blockquote>Yuqoridagi webhook manzilini to'lov bildirishnomalari "
-            "uchun ro'yxatga oling va webhook imzosi uchun "
-            "<code>secret</code> kalitini yuboring.</blockquote>",
+            "• Buyurtma <b>avtomatik</b> to'langan bo'lsa — hammasi tayyor ✅ "
+            "(provayder webhookni API_SECRET bilan imzolayapti, alohida secret "
+            "kerak emas).",
+            "• Bot sizga «to'lov tasdiqlanmadi» xabarini yuborsa — Paylov'dan "
+            "alohida webhook secret so'rang va «🔐 Webhook secret» orqali "
+            "kiriting.",
             "",
-            "Secret kelgach <b>«🔐 Webhook secret»</b> tugmasi orqali kiriting.",
+            "Paylov'ga yozadigan matn:",
+            "<blockquote>Webhook manzilimizni to'lov bildirishnomalari uchun "
+            "ro'yxatga oling. Webhook imzosi qaysi kalit bilan yasaladi — "
+            "api_secret bilanmi yoki alohida webhook secret beriladimi?</blockquote>",
             "",
-            "ℹ️ Shu paytgacha to'lov qilinsa — bot sizga darhol xabar beradi va "
-            "buyurtmani <code>/tolov</code> buyrug'i bilan qo'lda tasdiqlashingiz "
-            "mumkin (Admin botda). Ya'ni pul yo'qolmaydi.",
+            "ℹ️ Har qanday holatda <b>pul yo'qolmaydi</b>: tasdiqlanmagan to'lov "
+            "bo'lsa bot darhol xabar beradi va buyurtmani <code>/tolov</code> "
+            "orqali qo'lda tasdiqlaysiz (Admin botda).",
         ]
     return "\n".join(lines)
 
@@ -2440,6 +2450,7 @@ async def payments_check_token(callback: CallbackQuery):
 @router.callback_query(F.data == "pay:gen")
 async def payments_generate(callback: CallbackQuery):
     """Tokenni SARFLAB api_key/api_secret oladi va bazaga saqlaydi."""
+    from core.config import PAYLOV_WEBHOOK_URL
     from core.services import payment_keys, settings_service
     from core.services.paylov_onboarding import OnboardingError, onboard_and_save
 
@@ -2477,18 +2488,43 @@ async def payments_generate(callback: CallbackQuery):
         )
         return
 
+    # ── Kalitlarni NUSXALASH uchun qulay ko'rinishda yuboramiz ──
+    # Onboarding tokeni bir martalik, shuning uchun kalitlar bazaga saqlangan
+    # bo'lsa ham ularni Railway env'ga ko'chirib qo'yish MUHIM (baza qayta
+    # yaratilsa yo'qolmasin). Har bir qiymat alohida <code> blokda — Telegram'da
+    # bir bosishda nusxa olinadi.
     await _edit(
         callback,
         "✅ <b>Kalitlar yaratildi va saqlandi!</b>\n\n"
         f"🆔 Key ID: <code>{esc(str(info.get('id', '—')))}</code>\n"
-        f"🏷 Nomi: <code>{esc(str(info.get('name', '—')))}</code>\n"
-        f"🔐 API key: <code>{esc(payment_keys.mask(payment_keys.api_key()))}</code>\n\n"
-        "Kalitlar bazaga yozildi — Railway env'ni tahrirlash <b>shart emas</b>.\n"
-        "Xavfsizlik uchun to'liq qiymat ko'rsatilmaydi.\n\n"
-        "🔜 <b>Keyingi qadam:</b> webhook manzilini WLCM'ga bering va ular bergan "
-        "<b>secret</b>ni «🔐 Webhook secret» orqali kiriting — shundan keyingina "
-        "to'lovlar avtomatik tasdiqlanadi.",
-        kb.payments_back_kb(),
+        f"🏷 Nomi: <code>{esc(str(info.get('name', '—')))}</code>\n\n"
+        "Kalitlar bazaga yozildi — <b>hozircha ishlaydi</b>, redeploy shart emas.\n"
+        "⬇️ Quyidagilarni <b>Railway Variables</b>'ga ham qo'ying (zaxira uchun).",
+    )
+    await callback.message.answer(
+        f"<code>API_KEY={esc(payment_keys.api_key())}</code>\n\n"
+        f"<code>API_SECRET={esc(payment_keys.api_secret())}</code>"
+    )
+    await callback.message.answer(
+        "📌 <b>Keyingi qadamlar</b>\n\n"
+        "1️⃣ Yuqoridagi <code>API_KEY</code> va <code>API_SECRET</code> ni Railway → "
+        "Variables ga qo'shing (nusxa olish uchun qiymat ustiga bosing).\n"
+        "2️⃣ Webhook manzilini Paylov/WLCM'ga bering:\n"
+        f"<code>{esc(PAYLOV_WEBHOOK_URL)}</code>\n"
+        "3️⃣ Kichik summa bilan sinab ko'ring.\n\n"
+        "ℹ️ <b>Webhook secret haqida:</b> ko'p hollarda alohida secret kerak "
+        "emas — bot webhook imzosini <b>API_SECRET bilan ham</b> tekshirib "
+        "ko'radi. Agar provayder shu bilan imzolasa, to'lovlar <b>darhol "
+        "avtomatik</b> tasdiqlanadi. Ishlamasa, Paylov'dan alohida webhook "
+        "secret so'rab «🔐 Webhook secret» orqali kiritasiz.\n\n"
+        "⚠️ Bu kalitlarni hech kimga bermang. Nusxa olgach yuqoridagi xabarni "
+        "o'chirib tashlang — <code>API_SECRET</code> qayta ko'rsatilmaydi "
+        "(lekin «📤 Kalitlarni ko'rsatish» orqali olishingiz mumkin).",
+        reply_markup=kb.payments_back_kb(),
+    )
+    logger.warning(
+        "🔑 Onboarding bajarildi va kalitlar ko'rsatildi (superadmin=%s)",
+        callback.from_user.id,
     )
 
 
