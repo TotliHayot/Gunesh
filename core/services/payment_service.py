@@ -67,6 +67,10 @@ PROVIDER_LABELS = {
     "paylov": "Paylov",
 }
 
+# Tasdiqlanmagan webhook uchun adminlarga takroriy xabar yubormaslik uchun
+# (external_id -> oxirgi xabar vaqti). Jarayon xotirasida saqlanadi.
+_unverified_notified: dict[str, float] = {}
+
 
 def provider_label(code: str | None) -> str:
     code = (code or "").strip().lower()
@@ -349,6 +353,77 @@ async def process_webhook(payload: dict) -> dict:
             actual_provider=payload.get("provider"),
         )
         return {"ok": True}
+
+
+async def notify_unverified_webhook(payload: dict, reason: str) -> None:
+    """
+    Imzosi tasdiqlanmagan webhook keldi — adminlarni xabardor qiladi.
+
+    NEGA KERAK: webhook secret sozlanmagan bo'lsa (yoki noto'g'ri bo'lsa) so'rov
+    RAD ETILADI va buyurtma to'lanmagan holatda qoladi. Bu to'g'ri xatti-harakat
+    (soxta xabardan himoya), LEKIN hech kim xabardor bo'lmasa mijoz to'lagan
+    pul "yo'qolib" qoladi — admin buni bilmaydi.
+
+    XAVFSIZLIK: bu yerda hech narsa to'langan deb belgilanMAYDI. Faqat xabar
+    yuboriladi va faqat `external_id` bazadagi HAQIQIY kutilayotgan to'lovga mos
+    kelsa (aks holda tashqi shovqin bilan adminlarni spamlash mumkin bo'lardi).
+    Har bir to'lov uchun bir marta (soatda) xabar beriladi.
+    """
+    external_id = str(payload.get("external_id") or "")
+    if not external_id:
+        return
+
+    now = time.time()
+    last = _unverified_notified.get(external_id, 0.0)
+    if now - last < 3600:
+        return
+
+    try:
+        from core.database import AsyncSessionLocal
+        async with AsyncSessionLocal() as session:
+            payment = (await session.execute(
+                select(Payment).where(Payment.external_id == external_id)
+            )).scalar_one_or_none()
+            # Noma'lum yoki allaqachon yopilgan to'lov — e'tibor bermaymiz.
+            if payment is None or payment.status != "pending":
+                return
+            order = await session.get(Order, payment.order_id)
+            order_no = order.order_number if order else "—"
+
+        _unverified_notified[external_id] = now
+        # Keshni cheklaymiz (uzoq ishlaganda o'smasligi uchun).
+        if len(_unverified_notified) > 500:
+            cutoff = now - 7200
+            for k in [k for k, v in _unverified_notified.items() if v < cutoff]:
+                _unverified_notified.pop(k, None)
+
+        why = {
+            "secret_not_set": "webhook secret sozlanmagan",
+            "mismatch": "imzo mos kelmadi (secret noto'g'ri bo'lishi mumkin)",
+            "no_signature": "imzo yuborilmagan",
+        }.get(reason, reason)
+
+        state = str(payload.get("state") or "")
+        state_txt = "✅ to'landi" if state in ("2", "2.0") else f"holat={state}"
+
+        await _notify_admins(
+            "🚨 <b>To'lov xabari TASDIQLANMADI</b>\n\n"
+            f"🧾 Buyurtma: <b>#{order_no}</b>\n"
+            f"💰 Summa: <b>{payment.amount_som:,}</b> so'm\n"
+            f"📨 Provayder xabari: <b>{state_txt}</b>\n"
+            f"❗️ Sabab: <b>{why}</b>\n\n"
+            "Buyurtma <b>to'lanmagan</b> holatda qoldi. Pul haqiqatan tushganini "
+            "provayder kabinetida tekshiring va to'g'ri bo'lsa tasdiqlang:\n"
+            f"<code>/tolov {external_id}</code>\n\n"
+            "🔧 Buni butunlay hal qilish uchun Super Admin bot → "
+            "«💳 To'lov tizimi» → «🔐 Webhook secret» ni sozlang.".replace(",", " ")
+        )
+        logger.warning(
+            "🚨 Tasdiqlanmagan webhook adminlarga yuborildi: external_id=%s sabab=%s",
+            external_id, reason,
+        )
+    except Exception as e:
+        logger.warning("Tasdiqlanmagan webhook xabarini yuborishda xato: %s", e)
 
 
 async def _on_payment_canceled(session: AsyncSession, payment: Payment) -> None:
