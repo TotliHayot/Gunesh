@@ -64,6 +64,12 @@ async def paylov_webhook(request: Request):
             "❌ Webhook imzo rad etildi (%s): external_id=%s ip=%s",
             reason, payload.get("external_id"), client,
         )
+        # Adminlarni xabardor qilamiz — aks holda mijoz to'lagan pul "yo'qoladi"
+        # (buyurtma to'lanmagan qoladi va hech kim bilmaydi). Faqat bazadagi
+        # haqiqiy kutilayotgan to'lov uchun va soatda bir marta.
+        from core.services.payment_service import notify_unverified_webhook
+        await notify_unverified_webhook(payload or {}, reason)
+
         if reason == "secret_not_set":
             return JSONResponse(
                 status_code=403,
