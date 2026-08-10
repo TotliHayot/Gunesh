@@ -40,13 +40,12 @@ from core.config import (
     PAYLOV_PROVIDER,
     PAYLOV_PROVIDERS,
     PAYLOV_RETURN_URL,
-    PAYLOV_WEBHOOK_SECRET,
     PUBLIC_BASE_URL,
     CUSTOMER_BOT_USERNAME,
 )
 from core.models.order import Order
 from core.models.payment import Payment
-from core.services import paylov
+from core.services import payment_keys, paylov
 
 logger = logging.getLogger(__name__)
 
@@ -76,23 +75,29 @@ def is_online_provider(code: str | None) -> bool:
 # ─────────────────────────────────────────────────────────────
 #  WEBHOOK IMZOSI
 # ─────────────────────────────────────────────────────────────
-def verify_webhook_signature(payload: dict) -> tuple[bool, str]:
+async def verify_webhook_signature(payload: dict) -> tuple[bool, str]:
     """
     WLCM webhook imzosini tekshiradi (HMAC-SHA256).
 
     Formula:
         message  = "{order_id}:{payment_id}:{state}:{timestamp}"
-        expected = HMAC_SHA256(key=PAYLOV_WEBHOOK_SECRET, msg=message).hexdigest()
+        expected = HMAC_SHA256(key=<webhook_secret>, msg=message).hexdigest()
+
+    Secret env (`PAYLOV_WEBHOOK_SECRET`) yoki Super Admin bot orqali saqlangan
+    qiymatdan olinadi — shu sabab funksiya async (kalitlar ish vaqtida yuklanadi).
 
     Qaytaradi: (valid, reason).
       • secret sozlanmagan → (False, "secret_not_set") — FAIL-CLOSED, ya'ni
         webhook RAD ETILADI. Aks holda kim xohlasa "to'landi" xabari yuborib
         bepul buyurtma olishi mumkin bo'lardi.
     """
-    if not PAYLOV_WEBHOOK_SECRET:
+    await payment_keys.ensure_loaded()
+    secret = payment_keys.webhook_secret()
+    if not secret:
         logger.critical(
-            "🚨 PAYLOV_WEBHOOK_SECRET sozlanmagan! Webhook RAD ETILDI. "
-            "WLCM bergan secret'ni Railway env'ga qo'shing."
+            "🚨 Webhook secret sozlanmagan! Webhook RAD ETILDI. WLCM bergan "
+            "secret'ni Super Admin bot → «💳 To'lov tizimi» orqali kiriting "
+            "(yoki Railway env'da PAYLOV_WEBHOOK_SECRET)."
         )
         return False, "secret_not_set"
 
@@ -105,7 +110,7 @@ def verify_webhook_signature(payload: dict) -> tuple[bool, str]:
         f'{payload.get("state")}:{payload.get("timestamp")}'
     )
     expected = hmac.new(
-        PAYLOV_WEBHOOK_SECRET.encode("utf-8"),
+        secret.encode("utf-8"),
         message.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()

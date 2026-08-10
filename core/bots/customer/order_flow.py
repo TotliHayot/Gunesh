@@ -33,8 +33,14 @@ from core.bots.customer.keyboards import (
     pay_link,
     payment_providers,
 )
-from core.config import PAYLOV_ENABLED, PAYMENT_TEST_MODE
-from core.services import order_service, payment_service, settings_service, user_service
+from core.config import PAYMENT_TEST_MODE
+from core.services import (
+    order_service,
+    payment_keys,
+    payment_service,
+    settings_service,
+    user_service,
+)
 from core.services.i18n import t
 from core.services.paylov import PaylovError
 from core.utils import fmt_money
@@ -65,6 +71,9 @@ def _parse_order_id(data: str, index: int) -> int | None:
 @router.callback_query(F.data.startswith("pay:"))
 async def choose_provider(callback: CallbackQuery, session: AsyncSession):
     """«To'lov qilish» bosildi → to'lov usullarini ko'rsatamiz."""
+    # Kalitlar env'da yoki bazada (bot orqali onboarding) bo'lishi mumkin —
+    # tugmalarni chizishdan oldin yuklab olamiz.
+    await payment_keys.ensure_loaded()
     lang = await user_service.get_language(session, callback.from_user.id)
     order_id = _parse_order_id(callback.data, 1)
     if order_id is None:
@@ -103,6 +112,7 @@ async def choose_provider(callback: CallbackQuery, session: AsyncSession):
 @router.callback_query(F.data.startswith("paym:"))
 async def do_payment(callback: CallbackQuery, session: AsyncSession):
     """To'lov usuli tanlandi → onlayn bo'lsa checkout ochamiz, naqd bo'lsa qabul qilamiz."""
+    await payment_keys.ensure_loaded()
     lang = await user_service.get_language(session, callback.from_user.id)
     parts = callback.data.split(":")
     if len(parts) != 3:
@@ -134,7 +144,7 @@ async def do_payment(callback: CallbackQuery, session: AsyncSession):
         return
 
     # ── Kalitlar yo'q: yoki demo rejimi, yoki onlayn to'lov mavjud emas ──
-    if not PAYLOV_ENABLED:
+    if not payment_keys.enabled():
         if PAYMENT_TEST_MODE:
             await _simulate_payment(callback, session, order, provider, lang)
         else:

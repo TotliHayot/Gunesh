@@ -68,16 +68,15 @@ Barchasi **bitta `uvicorn` jarayonida** ishlaydi: FastAPI server ko'tarilganda 3
    > `DATABASE_URL` Railway tomonidan avtomatik beriladi.
    > `WEBAPP_URL` qo'yilmasa, Railway domeni (`RAILWAY_PUBLIC_DOMAIN`) avtomatik ishlatiladi.
 
-   **Onlayn to'lov uchun** (bularsiz faqat naqd to'lov ko'rinadi):
+   **Onlayn to'lov** uchun env qo'shish **shart emas** — Super Admin bot →
+   **«💳 To'lov tizimi»** bo'limida WLCM bergan **Token**ni kiritib, API
+   kalitlarini bir tugma bilan olasiz (kalitlar bazaga saqlanadi, qayta deploy
+   kerak emas). Kalitlar sozlanmaguncha mijozlarga faqat naqd to'lov ko'rinadi.
 
-   ```
-   API_KEY=...                   # WLCM (wlcm.uz) api_key
-   API_SECRET=...                # WLCM api_secret
-   PAYLOV_WEBHOOK_SECRET=...     # webhook URL ro'yxatga olingandan keyin beriladi
-   ```
    > WLCM kabinetiga webhook manzili sifatida
-   > `https://<railway-domain>/webhook/paylov` ni kiritasiz.
-   > To'liq ro'yxat va tushuntirish: [`docs/10-payment-integration.md`](docs/10-payment-integration.md)
+   > `https://<railway-domain>/webhook/paylov` ni kiritasiz — bot bu manzilni
+   > o'zi ko'rsatib turadi.
+   > To'liq tushuntirish: [`docs/10-payment-integration.md`](docs/10-payment-integration.md)
 
 3. Railway `Procfile`/`railway.json` orqali ishga tushiradi:
    `uvicorn webapp.app:app --host 0.0.0.0 --port $PORT`
