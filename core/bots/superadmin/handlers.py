@@ -2098,6 +2098,25 @@ _PAY_FIELDS = {
 }
 
 
+def _db_status_line() -> str:
+    """Bazadan kalit o'qish holati — HAR DOIM ko'rsatiladi.
+
+    Muhim: baza o'qilmasa kalitlarni saqlash ham ishlamaydi (bot orqali
+    kiritilgan qiymat yo'qoladi). Shu sabab bu holat kalitlar env'dan
+    ishlayotgan paytda ham ko'rinishi kerak.
+    """
+    from core.services import payment_keys
+
+    db_ok, db_count, db_err = payment_keys.load_status()
+    if db_ok:
+        empty = "" if db_count else " <i>(bo'sh)</i>"
+        return f"🗄 Baza: o'qildi ✅ — saqlangan qiymatlar: <b>{db_count} ta</b>{empty}"
+    return (
+        "🗄 Baza: ❗️ <b>o'qib bo'lmadi</b> — bot orqali kiritilgan kalitlar "
+        f"SAQLANMAYDI (faqat env ishlaydi)\n<code>{esc(db_err or 'sabab aniqlanmadi')}</code>"
+    )
+
+
 async def _payments_text() -> str:
     from core.config import (
         PAYLOV_BASE_URL, PAYLOV_PROVIDERS, PAYLOV_WEBHOOK_URL,
@@ -2143,6 +2162,7 @@ async def _payments_text() -> str:
         f"📡 Webhook secret: <code>{esc(payment_keys.mask(payment_keys.webhook_secret()))}</code>"
         f"{_src('webhook_secret')}"
         f"{'' if hook_ready else ' <i>(API_SECRET bilan tekshiriladi)</i>'}",
+        _db_status_line(),
         "",
         "📡 <b>Webhook manzili</b> — WLCM kabinetiga shuni bering:",
     ]
@@ -2190,22 +2210,6 @@ async def _payments_text() -> str:
             "sarflaydi — faqat <b>bir marta</b> bosing va kalitlarni darhol "
             "Railway env'ga qo'ying.",
         ]
-        # Diagnostika: baza o'qildimi va unda nechta qiymat bor.
-        db_ok, db_count, db_err = payment_keys.load_status()
-        if db_ok:
-            lines += [
-                "",
-                f"🗄 Baza o'qildi ✅ — saqlangan qiymatlar: <b>{db_count} ta</b>"
-                + ("" if db_count else " <i>(bo'sh)</i>"),
-            ]
-        else:
-            lines += [
-                "",
-                "🗄 ❗️ <b>Bazani o'qib bo'lmadi</b> — kalitlar saqlanmaydi.",
-                f"<code>{esc(db_err or 'sabab aniqlanmadi')}</code>",
-                "Bu holatda faqat env'dagi qiymatlar ishlaydi.",
-            ]
-
         if not has_token:
             lines += [
                 "",
