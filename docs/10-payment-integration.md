@@ -104,15 +104,52 @@ qilish **shart emas**.
 | 1 | 🎫 WLCM tokenini kiritish | Token bazaga saqlanadi. Xabar darhol o'chiriladi. |
 | 2 | 🔍 Tokenni tekshirish | `GET` bilan tokenning amaldaligini bilib oladi — **tokenni sarflamaydi**. |
 | 3 | 🔑 API kalitlarini olish | `POST` bilan `api_key`+`api_secret` yaratadi va saqlaydi. ⚠️ **Tokenni sarflaydi** — bir marta bosiladi. |
-| 4 | — | Bot ko'rsatgan **webhook manzilini** WLCM kabinetiga beriladi. |
-| 5 | 🔐 Webhook secret | WLCM webhook uchun bergan secret kiritiladi. |
-| ✅ | 🔌 Ulanishni tekshirish | `GET /me` bilan kalitlar ishlashini tasdiqlaydi. |
+| 4 | — | Bot ko'rsatgan **webhook manzilini** Paylov/WLCM jamoasiga berasiz va ulardan **secret** so'raysiz (pastga qarang). |
+| 5 | 🔐 Webhook secret | Ular bergan secret kiritiladi. |
+| ✅ | 🔌 Ulanishni tekshirish | `GET /me` bilan kalitlarni tasdiqlaydi va **Partner ID'ni avtomatik saqlaydi**. |
+
+### Webhook secret'ni qanday olish kerak
+
+Hujjatda webhook URL «**partner tomonidan ko'rsatiladi**» deyilgan
+([manba](https://docs.wlcm.uz/webhook.html)) — ya'ni uni o'zingiz ro'yxatga
+oladigan **API endpoint yo'q**. Bu qo'lda, Paylov/WLCM jamoasi orqali sozlanadi.
+
+Shu sabab kalitlarni bergan xat egalariga yozib, ikki narsani so'rash kerak:
+1. bot ko'rsatgan **webhook manzilini** to'lov bildirishnomalari uchun ro'yxatga olish;
+2. webhook imzosi uchun **secret** kalitini yuborish.
+
+⚠️ Secret **`api_secret` dan boshqa qiymat** — hujjat uni alohida sozlama
+(`PAYLOV_WEBHOOK_SECRET`) sifatida ko'rsatadi. Taxmin qilmang, so'rang.
+
+### Partner ID
+
+Integratsiya uchun **kerak emas** — autentifikatsiya faqat `X-API-Key` va imzo
+orqali bo'ladi, hech bir so'rovda `partner_id` yuborilmaydi. U faqat ma'lumot
+uchun ko'rsatiladi (provayder bilan yozishganda qulay).
+
+«🔌 Ulanishni tekshirish» tugmasi bosilganda `GET /me` javobidagi `id`
+**avtomatik saqlanadi**, shuning uchun odatda qo'lda kiritish kerak emas.
 
 Bo'lim holatni rangli ko'rsatadi:
 - 🔴 **O'chiq** — kalitlar yo'q, mijozlarga faqat naqd to'lov ko'rinadi
 - 🟡 **Yarim tayyor** — kalitlar bor, webhook secret yo'q → to'lov sahifasi
-  ochiladi, lekin natija **tasdiqlanmaydi**
+  ochiladi, lekin natija **avtomatik tasdiqlanmaydi**
 - 🟢 **To'liq ishlayapti**
+
+Har bir holatda bo'lim **keyingi qadamni aytib turadi** (🟡 holatda secret'ni
+qanday so'rash kerakligini ko'rsatadi).
+
+### 🟡 holatda pul yo'qolmaydi
+
+Webhook secret sozlanmaguncha kelgan to'lov xabarlari **rad etiladi** (bu ataylab
+shunday — imzosi tekshirilmagan xabar buyurtmani to'langan qilmasligi kerak).
+Ammo bunda **adminlar darhol xabardor qilinadi**: bot buyurtma raqami, summa va
+tayyor `/tolov <external_id>` buyrug'i bilan xabar yuboradi, admin provayder
+kabinetida tekshirib qo'lda tasdiqlaydi.
+
+Bu xabar faqat `external_id` bazadagi **haqiqiy kutilayotgan to'lov**ga mos
+kelganda va har to'lov uchun **soatda bir marta** yuboriladi — tashqi shovqin
+bilan adminlarni spamlash mumkin emas.
 
 **Xavfsizlik:** token, `api_key`, `api_secret` va webhook secret hech qachon
 to'liq ko'rsatilmaydi (faqat `AK_gen…3456` ko'rinishida). Kiritilgan qiymatli
@@ -137,7 +174,7 @@ Kalitlarni env orqali berish ham mumkin. **Env qiymati bazadagidan USTUN turadi*
 | `API_SECRET` | — | WLCM api_secret |
 | `PAYLOV_WEBHOOK_SECRET` | — | Webhook imzo kaliti. **Bo'sh bo'lsa webhook rad etiladi** |
 | `Base_URL` | `https://api.wlcm.uz` | API host (`/api/v1` qo'shilmaydi — kod o'zi qo'shadi) |
-| `PARTNER_ID` | — | Hamkor identifikatori |
+| `PARTNER_ID` | — | Hamkor identifikatori — **ixtiyoriy**, faqat ma'lumot uchun |
 | `WLCM_ONBOARDING_PATH` | `/api/v1/partners/onboarding/` | Faqat WLCM boshqa manzil bersa |
 | `PAYLOV_PROVIDERS` | `payme,click,uzum,paylov` | Mijozga ko'rinadigan usullar |
 | `PAYLOV_PROVIDER` | `paylov` | Default usul |

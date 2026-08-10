@@ -2086,9 +2086,13 @@ async def roles_delete_do(callback: CallbackQuery, session: AsyncSession):
 #  hech qachon to'liq ko'rsatilmaydi — faqat maskalangan holda. Kiritilgan
 #  qiymatli xabar esa darhol o'chiriladi (chatda qolib ketmasligi uchun).
 # ═════════════════════════════════════════════════════════════
+#   maydon -> (yorliq, minimal uzunlik)
+# Partner ID qisqa bo'lishi mumkin (masalan "42"), shu sabab minimal uzunlik
+# har bir maydon uchun alohida.
 _PAY_FIELDS = {
-    "prod_token": ("🎫 WLCM tokeni", "prod_token"),
-    "webhook_secret": ("🔐 Webhook secret", "webhook_secret"),
+    "prod_token": ("🎫 WLCM tokeni", 8),
+    "webhook_secret": ("🔐 Webhook secret", 8),
+    "partner_id": ("🏷 Partner ID", 1),
 }
 
 
@@ -2113,7 +2117,9 @@ async def _payments_text() -> str:
     elif keys_ready and not hook_ready:
         status = (
             "🟡 <b>Yarim tayyor</b> — kalitlar bor, lekin webhook secret yo'q.\n"
-            "   To'lov sahifasi ochiladi, ammo natija <b>tasdiqlanmaydi</b>."
+            "To'lov sahifasi ochiladi, ammo natija <b>avtomatik tasdiqlanmaydi</b> "
+            "(buyurtma to'lanmagan holatda qoladi va siz uni qo'lda tasdiqlashingiz "
+            "kerak bo'ladi)."
         )
     else:
         status = "🔴 <b>O'chiq</b> — mijozlarga faqat naqd to'lov ko'rsatiladi"
@@ -2124,7 +2130,8 @@ async def _payments_text() -> str:
         status,
         "",
         f"🌐 Server: <code>{esc(PAYLOV_BASE_URL)}</code>",
-        f"🏷 Partner ID: <code>{esc(payment_keys.partner_id()) or '—'}</code>{_src('partner_id')}",
+        f"🏷 Partner ID: <code>{esc(payment_keys.partner_id()) or '—'}</code>"
+        f"{_src('partner_id')} <i>(ixtiyoriy)</i>",
         f"🎫 Token: <code>{esc(payment_keys.mask(payment_keys.prod_token()))}</code>{_src('prod_token')}",
         f"🔐 API key: <code>{esc(payment_keys.mask(payment_keys.api_key()))}</code>{_src('api_key')}",
         f"🔑 API secret: <code>{esc(payment_keys.mask(payment_keys.api_secret()))}</code>{_src('api_secret')}",
@@ -2161,6 +2168,24 @@ async def _payments_text() -> str:
             "2️⃣ <b>Tokenni tekshirish</b> — amaldaligini bilib oladi (tokenni sarflamaydi).",
             "3️⃣ <b>API kalitlarini olish</b> — kalitlar yaratilib avtomatik saqlanadi.",
             "4️⃣ Webhook manzilini WLCM'ga bering, ular bergan <b>secret</b>ni kiriting.",
+        ]
+    elif not hook_ready:
+        # Aynan shu holatda nima qilish kerakligini ANIQ aytamiz.
+        lines += [
+            "",
+            "🔜 <b>Oxirgi qadam — webhook secret</b>",
+            "Webhook secret'ni o'zingiz yasay olmaysiz — uni <b>Paylov / WLCM "
+            "jamoasi beradi</b>. Ularga yozing:",
+            "",
+            "<blockquote>Yuqoridagi webhook manzilini to'lov bildirishnomalari "
+            "uchun ro'yxatga oling va webhook imzosi uchun "
+            "<code>secret</code> kalitini yuboring.</blockquote>",
+            "",
+            "Secret kelgach <b>«🔐 Webhook secret»</b> tugmasi orqali kiriting.",
+            "",
+            "ℹ️ Shu paytgacha to'lov qilinsa — bot sizga darhol xabar beradi va "
+            "buyurtmani <code>/tolov</code> buyrug'i bilan qo'lda tasdiqlashingiz "
+            "mumkin (Admin botda). Ya'ni pul yo'qolmaydi.",
         ]
     return "\n".join(lines)
 
@@ -2246,24 +2271,29 @@ async def payments_value_received(message: Message, state: FSMContext):
         await message.answer("❗️ Noma'lum maydon.", reply_markup=kb.main_menu())
         return
 
-    if len(value) < 8:
+    label, min_len = _PAY_FIELDS[field]
+    if len(value) < min_len:
         # Holat SAQLANADI — qayta so'raymiz.
         await message.answer(
-            "❗️ Qiymat juda qisqa ko'rinadi (kamida 8 belgi). Qayta yuboring "
-            "yoki «❌ Bekor qilish»."
+            f"❗️ Qiymat juda qisqa ko'rinadi (kamida {min_len} belgi). Qayta "
+            "yuboring yoki «❌ Bekor qilish»."
         )
         return
 
-    label, key_name = _PAY_FIELDS[field]
-    await payment_keys.save_one(key_name, value)
+    await payment_keys.save_one(field, value)
     await payment_keys.ensure_loaded(force=True)
     await state.clear()
 
     note = ""
-    if key_name == "prod_token":
+    if field == "prod_token":
         note = (
             "\n\nEndi <b>«🔍 Tokenni tekshirish»</b>, so'ng "
             "<b>«🔑 API kalitlarini olish»</b> tugmasini bosing."
+        )
+    elif field == "webhook_secret":
+        note = (
+            "\n\n✅ Endi to'lovlar <b>avtomatik tasdiqlanadi</b>. "
+            "Kichik summa bilan sinab ko'rishni tavsiya qilamiz."
         )
     await message.answer(
         f"✅ Saqlandi: <b>{label}</b>\n"
@@ -2395,15 +2425,32 @@ async def payments_test(callback: CallbackQuery):
         )
         return
 
+    # Partner ID'ni /me javobidan AVTOMATIK saqlaymiz — qo'lda kiritish shart emas.
+    partner_id = me.get("id")
+    if partner_id and not payment_keys.partner_id():
+        try:
+            await payment_keys.save_one("partner_id", str(partner_id))
+            await payment_keys.ensure_loaded(force=True)
+        except Exception as e:
+            logger.warning("Partner ID saqlanmadi: %s", e)
+
     api_keys = me.get("api_keys") or []
+    hook_note = ""
+    if not payment_keys.webhook_ready():
+        hook_note = (
+            "\n\n⚠️ <b>Webhook secret hali yo'q</b> — to'lovlar avtomatik "
+            "tasdiqlanmaydi. Paylov jamoasidan so'rang."
+        )
     await _edit(
         callback,
         "🔌 <b>Ulanish testi</b>\n\n"
         "✅ Kalitlar <b>ishlayapti</b>!\n\n"
         f"🏷 Partner: <b>{esc(str(me.get('name', '—')))}</b>\n"
-        f"🆔 ID: <code>{esc(str(me.get('id', '—')))}</code>\n"
+        f"🆔 Partner ID: <code>{esc(str(partner_id or '—'))}</code>\n"
+        f"🔑 UUID: <code>{esc(str(me.get('uuid', '—')))}</code>\n"
         f"📦 Faol: <b>{'ha' if me.get('is_active') else 'yo‘q'}</b>\n"
-        f"🗝 API kalitlar soni: <b>{len(api_keys)}</b>",
+        f"🗝 API kalitlar soni: <b>{len(api_keys)}</b>"
+        f"{hook_note}",
         kb.payments_back_kb(),
     )
 
