@@ -2199,6 +2199,16 @@ async def _payments_text() -> str:
                 "Railway o'zi qayta deploy qiladi — so'ng shu bo'limda "
                 "<b>«🔄 Yangilash»</b> tugmasini bosing.",
                 "",
+                "🔎 <b>Qo'ygan bo'lsam ham chiqmasa:</b>",
+                "• Telegram xabari <b>o'zi yangilanmaydi</b> — "
+                "<code>/payments</code> buyrug'ini qaytadan yuboring "
+                "yoki «🔄 Yangilash» bosing;",
+                "• o'zgaruvchi <b>to'g'ri servisga</b> qo'yilganini tekshiring "
+                "(bot ishlaydigan servis, Postgres emas);",
+                "• nom aynan <code>PROD_TOKEN</code> bo'lsin (bo'sh joy yoki "
+                "boshqa harflar bo'lmasin);",
+                "• Railway deploy <b>tugaganini</b> kutib, keyin yangilang.",
+                "",
                 "<i>Yoki tokenni env'ga qo'ymasdan shu botga yuborishingiz ham "
                 "mumkin — «🎫 WLCM tokenini kiritish».</i>",
             ]
