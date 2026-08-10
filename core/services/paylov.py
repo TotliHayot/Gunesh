@@ -28,12 +28,8 @@ from urllib.parse import parse_qsl, urlencode
 
 import httpx
 
-from core.config import (
-    PAYLOV_API_KEY,
-    PAYLOV_API_SECRET,
-    PAYLOV_BASE_URL,
-    PAYLOV_PROVIDER,
-)
+from core.config import PAYLOV_BASE_URL, PAYLOV_PROVIDER
+from core.services import payment_keys
 
 logger = logging.getLogger(__name__)
 
@@ -54,13 +50,18 @@ def _canonical_path(path: str, query_string: str = "") -> str:
 
 
 def make_signature(method: str, path: str, timestamp: str, body: bytes,
-                   query_string: str = "") -> str:
-    """HMAC-SHA256 imzo (raw secret kalit bilan)."""
+                   query_string: str = "", secret: str | None = None) -> str:
+    """HMAC-SHA256 imzo (raw secret kalit bilan).
+
+    `secret` berilmasa joriy `api_secret` ishlatiladi (env yoki bot orqali
+    saqlangan). Kalitlar ish vaqtida o'zgarishi mumkin bo'lgani uchun ular
+    import vaqtida emas, HAR CHAQIRUVDA o'qiladi.
+    """
     canonical_path = _canonical_path(path, query_string)
     body_hash = hashlib.sha256(body).hexdigest()
     message = f"{method.upper()}\n{canonical_path}\n{timestamp}\n{body_hash}"
     return hmac.new(
-        PAYLOV_API_SECRET.encode(),
+        (secret if secret is not None else payment_keys.api_secret()).encode(),
         message.encode(),
         hashlib.sha256,
     ).hexdigest()
@@ -74,15 +75,21 @@ def _serialize(payload: dict | None) -> bytes:
 
 async def _request(method: str, path: str, payload: dict | None = None) -> dict:
     """Imzolangan so'rov yuboradi va JSON javobni qaytaradi."""
-    if not PAYLOV_API_KEY or not PAYLOV_API_SECRET:
-        raise PaylovError("To'lov kalitlari sozlanmagan (API_KEY / API_SECRET).")
+    # Kalitlar env'dan yoki bazadan (bot orqali onboarding) olinadi.
+    await payment_keys.ensure_loaded()
+    key, secret = payment_keys.api_key(), payment_keys.api_secret()
+    if not key or not secret:
+        raise PaylovError(
+            "To'lov kalitlari sozlanmagan (API_KEY / API_SECRET). "
+            "Super Admin bot → «💳 To'lov tizimi» orqali sozlang."
+        )
 
     body = _serialize(payload)
     timestamp = str(int(time.time() * 1000))
-    signature = make_signature(method, path, timestamp, body)
+    signature = make_signature(method, path, timestamp, body, secret=secret)
 
     headers = {
-        "X-API-Key": PAYLOV_API_KEY,
+        "X-API-Key": key,
         "X-Timestamp": timestamp,
         "X-Signature": signature,
         "Content-Type": "application/json",

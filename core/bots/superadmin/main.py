@@ -44,6 +44,7 @@ async def main():
         BotCommand(command="analytics", description="📊 Analitika"),
         BotCommand(command="broadcast", description="📣 Ommaviy xabar"),
         BotCommand(command="status", description="ℹ️ Tizim holati"),
+        BotCommand(command="payments", description="💳 To'lov tizimi"),
         BotCommand(command="cancel", description="❌ Amalni bekor qilish"),
         BotCommand(command="help", description="🆘 Qo'llanma"),
     ])

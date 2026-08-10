@@ -148,6 +148,16 @@ FORCE_TABLES = [
         """,
     ),
     (
+        "payment_credentials",
+        """
+        CREATE TABLE IF NOT EXISTS payment_credentials (
+            key VARCHAR(64) PRIMARY KEY,
+            value TEXT DEFAULT '',
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+    ),
+    (
         "admin_roles",
         """
         CREATE TABLE IF NOT EXISTS admin_roles (
@@ -261,7 +271,7 @@ async def create_tables():
         # Barcha modellarni import qilamiz — Base.metadata to'lishi uchun.
         from core.models import (  # noqa: F401
             setting, user, category, product, banner, order, media, admin_role,
-            payment,
+            payment, payment_credential,
         )
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)

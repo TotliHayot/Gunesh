@@ -27,6 +27,7 @@ BTN_ANALYTICS = "📊 Analitika"
 BTN_SHOP_STATUS = "🏪 Do'kon holati"
 BTN_TEAM = "👥 Jamoa"
 BTN_SYSTEM = "ℹ️ Tizim"
+BTN_PAYMENTS = "💳 To'lov tizimi"
 
 # ── Yordamchi tugmalar (FSM ichida) ──
 BTN_CANCEL = "❌ Bekor qilish"
@@ -145,6 +146,7 @@ def main_menu() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=BTN_MARKETING), KeyboardButton(text=BTN_SETTINGS)],
             [KeyboardButton(text=BTN_ANALYTICS), KeyboardButton(text=BTN_SHOP_STATUS)],
             [KeyboardButton(text=BTN_TEAM), KeyboardButton(text=BTN_SYSTEM)],
+            [KeyboardButton(text=BTN_PAYMENTS)],
         ],
         resize_keyboard=True,
         input_field_placeholder="Bo'limni tanlang yoki /help",
@@ -482,3 +484,39 @@ def system_kb() -> InlineKeyboardMarkup:
         [_btn("🔄 Yangilash", "sys:main")],
         back_row(),
     ])
+
+
+
+# ═════════════════════════════════════════════════════════════
+#  TO'LOV TIZIMI (WLCM: Payme / Click / Uzum / Paylov)
+# ═════════════════════════════════════════════════════════════
+def payments_kb(*, keys_ready: bool, has_token: bool, hook_ready: bool) -> InlineKeyboardMarkup:
+    """To'lov tizimi bosh oynasi.
+
+    Tugmalar holatga qarab o'zgaradi — do'kon egasi keyingi qadamni adashmasdan
+    topadi:
+      • kalitlar yo'q  → «Tokenni kiritish» / «Tokenni tekshirish» / «Kalit olish»
+      • kalitlar bor   → «Ulanishni tekshirish» + webhook secret sozlash
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+
+    if not keys_ready:
+        rows.append([_btn("🎫 WLCM tokenini kiritish", "pay:token")])
+        if has_token:
+            rows.append([_btn("🔍 Tokenni tekshirish", "pay:check")])
+            rows.append([_btn("🔑 API kalitlarini olish", "pay:gen")])
+    else:
+        rows.append([_btn("🔌 Ulanishni tekshirish", "pay:test")])
+
+    hook_label = "🔐 Webhook secret" + (" ✅" if hook_ready else " ❗️")
+    rows.append([_btn(hook_label, "pay:hook")])
+    rows.append([_btn("🔄 Yangilash", "pay:menu")])
+    if keys_ready or has_token or hook_ready:
+        rows.append([_btn("🗑 Kalitlarni tozalash", "pay:wipe")])
+    rows.append(back_row())
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def payments_back_kb() -> InlineKeyboardMarkup:
+    """Faqat «To'lov tizimi»ga qaytish tugmasi (natija oynalari uchun)."""
+    return InlineKeyboardMarkup(inline_keyboard=[back_row("pay:menu", "⬅️ To'lov tizimi")])

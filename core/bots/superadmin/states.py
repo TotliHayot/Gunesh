@@ -70,3 +70,12 @@ class ProductSearch(StatesGroup):
 class Broadcast(StatesGroup):
     """Mijozlarga ommaviy xabar: matn -> tasdiq."""
     text = State()
+
+
+class PaymentSetup(StatesGroup):
+    """To'lov tizimi sozlash — WLCM tokeni yoki webhook secret kiritish.
+
+    Qaysi qiymat kutilayotgani FSM ma'lumotidagi `field` orqali aniqlanadi
+    (`EditSetting` bilan bir xil uslub).
+    """
+    value = State()
