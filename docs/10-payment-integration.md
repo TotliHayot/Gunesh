@@ -178,7 +178,117 @@ qilinsa/rad etilsa mijozga operator kontakti (`admin_contact` sozlamasi) bilan
 xabar yuboriladi va super adminlarga audit xabari ketadi
 (`core/bots/admin/handlers.py`). Pul provayder kabinetidan qo'lda qaytariladi.
 
-## 10.10 Keyingi qadamlar (hozircha bajarilmagan)
+## 10.10 API shartnomasi — rasmiy hujjat bilan tekshirilgan
+
+Quyidagilar [WLCM API hujjati](https://docs.wlcm.uz/) bo'yicha tasdiqlangan va
+kodda aynan shunday amalga oshirilgan. *Ma'lumot litsenziya talablariga muvofiq
+qayta ifodalangan.*
+
+### Autentifikatsiya ([manba](https://docs.wlcm.uz/authentication.html))
+
+Headerlar: `X-API-Key`, `X-Timestamp` (unix **millisekund**), `X-Signature`,
+`Content-Type: application/json`.
+
+```
+imzo_matni = "{METHOD}\n{canonical_path}\n{TIMESTAMP}\n{SHA256(raw_body)}"
+X-Signature = HMAC_SHA256(key=api_secret, msg=imzo_matni).hexdigest()
+```
+
+- HMAC kaliti — **xom (raw) `api_secret`**, uning sha256 hashi emas.
+- `canonical_path` — so'rov yo'li; query parametrlar bo'lsa **tartiblanadi** va
+  urlencode qilinib yo'lga qo'shiladi.
+- Imzo **aynan yuborilgan bayt**lar ustidan hisoblanadi (shu sabab kodda body
+  bir marta serializatsiya qilinib, xuddi shu baytlar ham imzolanadi, ham
+  yuboriladi).
+- GET so'rovlarda bo'sh body hashi ishlatiladi.
+- ⚠️ `X-Timestamp` **300 soniyadan** ko'p farq qilsa so'rov `401` bilan rad
+  etiladi — server vaqti to'g'ri bo'lishi kerak.
+
+Kod: `core/services/paylov.py` → `make_signature()`. Test hujjatdagi mustaqil
+namuna bilan bayt-baytga solishtiradi.
+
+### Yo'l prefiksi
+
+Barcha endpointlar **`/api/v1`** ostida:
+`/api/v1/integrations/checkout`, `/api/v1/integrations/me` — bu
+[Python](https://docs.wlcm.uz/python-signature.html),
+[Bash](https://docs.wlcm.uz/bash-signature.html) va
+[cURL](https://docs.wlcm.uz/curl-examples.html) namunalarida aniq ko'rsatilgan.
+Shu sabab `Base_URL` faqat **host** bo'lishi kerak — kod prefiksni o'zi qo'shadi
+(env'ga `/api/v1` qo'shib qo'yilsa, `_normalize_api_base()` uni olib tashlaydi).
+
+### Checkout ([manba](https://docs.wlcm.uz/checkout-api.html))
+
+`POST /api/v1/integrations/checkout` → muvaffaqiyatda **201**
+
+| Maydon | Majburiy | Izoh |
+|---|---|---|
+| `amount` | ✅ | **Tiyinda**, 0 dan katta |
+| `return_url` | ✅ | To'lovdan keyin qaytish manzili |
+| `payment_provider` | shartli | `payme` / `click` / `uzum` / `paylov` / `card` |
+| `external_id` | ✗ | Maksimum **100** belgi |
+
+Javob: `{order_id, external_id, state, checkout_url, message}`.
+
+⚠️ `return_url` majburiy bo'lgani uchun kod uni **hech qachon bo'sh
+yubormaydi**: aniq sozlama → bot havolasi → Mini App domeni → zaxira qiymat.
+
+### Holatlar ([manba](https://docs.wlcm.uz/states.html))
+
+`1` = kutilmoqda, `2` = muvaffaqiyatli, `-2` = bekor qilingan.
+Kod **faqat `2`** da buyurtmani to'langan qiladi; qolgan qiymatlar xavfsiz
+tarzda e'tiborsiz qoldiriladi (whitelist yondashuvi).
+
+### Webhook ([manba](https://docs.wlcm.uz/webhook.html), [imzo](https://docs.wlcm.uz/webhook-signature.html))
+
+Payload: `external_id`, `order_id`, `payment_id`, `amount`, `state`, `provider`,
+`timestamp`, `signature`.
+
+```
+imzo_matni = "{order_id}:{payment_id}:{state}:{timestamp}"
+signature  = HMAC_SHA256(key=webhook_secret, msg=imzo_matni).hexdigest()
+```
+
+- `amount` matn ko'rinishida keladi (masalan `"12000.00"`) — kod uni **so'm ham,
+  tiyin ham** deb talqin qilib solishtiradi.
+- `provider` — haqiqatan ishlatilgan shlyuz; kod aynan shu qiymatni yozib qo'yadi
+  (mijoz tanlaganidan farq qilishi mumkin).
+
+### Onboarding ([manba](https://docs.wlcm.uz/onboarding-api.html))
+
+- `GET partners/onboarding/?token=…` → `{"valid": true}` — **tokenni sarflamaydi**.
+- `POST partners/onboarding/?token=…` + `{"name": "…"}` →
+  `{id, name, api_key, api_secret}` — `uses_left` kamayadi, 0 bo'lsa token o'ladi.
+- **HMAC talab qilinmaydi** (bu bosqichda hali `api_secret` yo'q).
+- Xatolar: `400 invalid_or_expired`, `403 ip_not_allowed`,
+  `403 partner_inactive`, `500 internal_error` — kod har birini o'zbekcha
+  tushunarli matnga aylantiradi.
+
+Hujjatda yo'l ikki xil ko'rsatilgani uchun (`partners/onboarding/` va
+`/onboarding/`) kod bir nechta nomzodni navbat bilan sinaydi (`404` → keyingisi)
+va `WLCM_ONBOARDING_PATH` env orqali ham o'zgartirish mumkin.
+
+### Fiskalizatsiya ([manba](https://docs.wlcm.uz/fiscalization-api.html))
+
+`POST /api/v1/fiscalization/register` — `{payment_id, items:[…]}`.
+`items` elementi: `title`, `price`, `count` (majburiy), `code` (MXIK sifatida
+saqlanadi), `package_code`, `discount`, `pinfl`, `tin` (ixtiyoriy).
+Javobda `fiscal_number` va `qr_code_url` bo'ladi — kod ularni mijozga yuboradi.
+
+Hujjat namunasida `price` qiymati checkout `amount` bilan bir xil (tiyin)
+ko'rsatilgani uchun kod narxlarni **tiyinga** aylantirib yuboradi.
+
+### Ataylab amalga oshirilmagan
+
+- **`card` provayderi** — u `checkout_url` bermaydi, balki `transaction_id` +
+  `cid` qaytarib, [OTP tasdiqlash](https://docs.wlcm.uz/otp-confirm.html)
+  (`POST /integrations/payment/card/confirm`) talab qiladi. Karta ma'lumotlarini
+  botda so'rash mas'uliyatli (PCI) va boshqa oqim kerak — shu sabab faqat
+  redirect-checkout provayderlari ko'rsatiladi.
+- **Payment Split** — bizga kerak emas (bitta merchant).
+- **`POST /fiscalization/refund`** — refund hozircha qo'lda bajariladi (10.9).
+
+## 10.11 Keyingi qadamlar (hozircha bajarilmagan)
 
 - **To'lanmagan buyurtma TTL** — mijoz to'lovni tashlab ketsa ombor qoldig'i
   rezervda qolib ketadi. `apscheduler` allaqachon `requirements.txt` da bor;

@@ -49,7 +49,13 @@ from core.services import payment_keys, paylov
 
 logger = logging.getLogger(__name__)
 
-# WLCM holat kodlari.
+# WLCM holat kodlari (docs.wlcm.uz → States).
+#   1  STATE_PENDING   — to'lov kutilmoqda (e'tiborsiz qoldiriladi)
+#   2  STATE_SUCCESS   — muvaffaqiyatli
+#  -2  STATE_CANCELLED — bekor qilingan
+# Faqat 2 buyurtmani to'langan qiladi; boshqa har qanday qiymat xavfsiz
+# tarzda e'tiborsiz qoldiriladi (whitelist yondashuvi).
+STATE_PENDING = 1
 STATE_SUCCESS = 2
 STATE_CANCELLED = -2
 
@@ -127,15 +133,28 @@ def _gen_external_id(order_id: int) -> str:
     return f"gz{int(order_id)}t{int(time.time())}r{secrets.token_hex(6)}"
 
 
-def _return_url() -> str | None:
-    """To'lovdan keyin mijoz qaytariladigan manzil (bot havolasi ustuvor)."""
+def _return_url() -> str:
+    """To'lovdan keyin mijoz qaytariladigan manzil.
+
+    `return_url` — WLCM'da MAJBURIY maydon (bo'sh yuborilsa 422). Shu sabab bu
+    funksiya HECH QACHON bo'sh qaytarmaydi: aniq sozlama → bot havolasi →
+    Mini App domeni → oxirgi chora sifatida Telegram bosh sahifasi.
+    """
     if PAYLOV_RETURN_URL:
         return PAYLOV_RETURN_URL
     from core.bots import registry
     username = (registry.customer_bot_username or CUSTOMER_BOT_USERNAME or "").lstrip("@")
     if username:
         return f"https://t.me/{username}"
-    return PUBLIC_BASE_URL or None
+    if PUBLIC_BASE_URL:
+        return PUBLIC_BASE_URL
+    # Bu holat bo'lmasligi kerak (bot username startup'da olinadi), lekin
+    # to'lovni butunlay to'xtatib qo'ymaslik uchun xavfsiz zaxira.
+    logger.warning(
+        "⚠️ return_url aniqlanmadi — zaxira qiymat ishlatiladi. "
+        "PAYLOV_RETURN_URL yoki WEBAPP_URL env'ini sozlang."
+    )
+    return "https://t.me"
 
 
 async def create_checkout_for_order(
@@ -175,7 +194,7 @@ async def create_checkout_for_order(
     resp = await paylov.create_checkout(
         payment.external_id,
         amount_tiyin,
-        return_url=_return_url(),
+        return_url=_return_url(),   # majburiy maydon — hech qachon bo'sh emas
         provider=prov,
     )
     checkout_url = resp.get("checkout_url") or resp.get("payment_url") or resp.get("url")
@@ -322,7 +341,13 @@ async def process_webhook(payload: dict) -> dict:
             )
             return {"ok": True}
 
-        await confirm_payment(session, payment, provider_payment_id)
+        # Webhookdagi `provider` — haqiqatan ishlatilgan to'lov shlyuzi. Mijoz
+        # tanlagan provayderdan farq qilishi mumkin (masalan agregator boshqa
+        # yo'nalishga o'tkazsa), shuning uchun aynan shuni yozib qo'yamiz.
+        await confirm_payment(
+            session, payment, provider_payment_id,
+            actual_provider=payload.get("provider"),
+        )
         return {"ok": True}
 
 
@@ -348,6 +373,7 @@ async def confirm_payment(
     session: AsyncSession,
     payment: Payment,
     provider_payment_id=None,
+    actual_provider: str | None = None,
 ) -> bool:
     """
     To'lovni tasdiqlaydi: `Payment` → paid, buyurtma → to'langan.
@@ -376,6 +402,9 @@ async def confirm_payment(
         payment.paid_at = now
         if provider_payment_id is not None:
             payment.payment_id = str(provider_payment_id)
+        # Haqiqiy shlyuz nomi (webhookdan) — faqat tanilgan qiymat bo'lsa.
+        if actual_provider and is_online_provider(actual_provider):
+            payment.provider = str(actual_provider).strip().lower()[:24]
 
         if not already_paid:
             order.is_paid = True
@@ -465,23 +494,26 @@ async def _try_fiscalization(session: AsyncSession, payment: Payment, order: Ord
     if payment.fiscal_done or not payment.payment_id:
         return
     try:
+        # Narx TIYINDA yuboriladi — hujjatdagi namunada `price: 120000` aynan
+        # checkout `amount: 120000` (tiyin) bilan bir xil ko'rsatilgan.
+        # Bizda narxlar so'mda saqlanadi, shuning uchun 100 ga ko'paytiramiz.
         items: list[dict] = []
         for it in order.items:
             item = {
                 "title": it.name_snapshot,
-                "price": int(it.price_snapshot),
+                "price": int(it.price_snapshot) * 100,
                 "count": int(it.qty),
                 "vat_percent": PAYLOV_FISCAL_VAT_PERCENT,
             }
             if PAYLOV_FISCAL_MXIK:
-                item["code"] = PAYLOV_FISCAL_MXIK
+                item["code"] = PAYLOV_FISCAL_MXIK  # mxik sifatida saqlanadi
             if PAYLOV_FISCAL_PACKAGE_CODE:
                 item["package_code"] = PAYLOV_FISCAL_PACKAGE_CODE
             items.append(item)
         if order.delivery_fee:
             items.append({
                 "title": "Yetkazib berish",
-                "price": int(order.delivery_fee),
+                "price": int(order.delivery_fee) * 100,
                 "count": 1,
                 "vat_percent": PAYLOV_FISCAL_VAT_PERCENT,
             })
