@@ -2190,6 +2190,22 @@ async def _payments_text() -> str:
             "sarflaydi — faqat <b>bir marta</b> bosing va kalitlarni darhol "
             "Railway env'ga qo'ying.",
         ]
+        # Diagnostika: baza o'qildimi va unda nechta qiymat bor.
+        db_ok, db_count, db_err = payment_keys.load_status()
+        if db_ok:
+            lines += [
+                "",
+                f"🗄 Baza o'qildi ✅ — saqlangan qiymatlar: <b>{db_count} ta</b>"
+                + ("" if db_count else " <i>(bo'sh)</i>"),
+            ]
+        else:
+            lines += [
+                "",
+                "🗄 ❗️ <b>Bazani o'qib bo'lmadi</b> — kalitlar saqlanmaydi.",
+                f"<code>{esc(db_err or 'sabab aniqlanmadi')}</code>",
+                "Bu holatda faqat env'dagi qiymatlar ishlaydi.",
+            ]
+
         if not has_token:
             lines += [
                 "",
