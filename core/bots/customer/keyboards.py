@@ -10,12 +10,12 @@ from aiogram.types import (
 )
 
 from core.config import (
-    PAYLOV_ENABLED,
     PAYLOV_PROVIDERS,
     PAYMENT_ALLOW_CASH,
     PAYMENT_TEST_MODE,
     WEBAPP_URL,
 )
+from core.services import payment_keys
 from core.services.i18n import t
 
 
@@ -65,8 +65,11 @@ def online_payment_available() -> bool:
     Kalitlar sozlanmagan bo'lsa onlayn tugmalar KO'RSATILMAYDI — aks holda mijoz
     bosadi va hech narsa bo'lmaydi (yoki eski sinov rejimida bepul o'tib ketadi).
     Sinov uchun ataylab PAYMENT_TEST_MODE=true qo'yilsa ko'rsatiladi.
+
+    DIQQAT: chaqirishdan oldin `await payment_keys.ensure_loaded()` bajarilgan
+    bo'lishi kerak (kalitlar bazadan ham olinishi mumkin).
     """
-    return PAYLOV_ENABLED or PAYMENT_TEST_MODE
+    return payment_keys.enabled() or PAYMENT_TEST_MODE
 
 
 def pay_start(order_id: int, lang: str) -> InlineKeyboardMarkup:

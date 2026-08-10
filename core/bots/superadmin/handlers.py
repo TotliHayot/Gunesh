@@ -59,6 +59,7 @@ from core.bots.superadmin.states import (
     EditCategory,
     EditProduct,
     EditSetting,
+    PaymentSetup,
     ProductSearch,
     ShopLocation,
 )
@@ -148,6 +149,7 @@ HELP_TEXT = (
     "/analytics — analitika\n"
     "/broadcast — mijozlarga ommaviy xabar\n"
     "/status — tizim holati\n"
+    "/payments — to'lov tizimi sozlamalari\n"
     "/cancel — joriy amalni bekor qilish\n\n"
     "<b>Bo'limlar</b>\n"
     f"📦 <b>{kb.BTN_CATALOG}</b> — mahsulot va kategoriyalar (qo'shish, tahrirlash, "
@@ -157,7 +159,9 @@ HELP_TEXT = (
     f"⚙️ <b>{kb.BTN_SETTINGS}</b> — nom, logo, valyuta, narxlar, ish vaqti, manzil.\n"
     f"📊 <b>{kb.BTN_ANALYTICS}</b> — tushum, buyurtmalar, eng ko'p sotilganlar.\n"
     f"🏪 <b>{kb.BTN_SHOP_STATUS}</b> — do'konni vaqtincha yopish/ochish.\n"
-    f"👥 <b>{kb.BTN_TEAM}</b> — admin va superadminlarni boshqarish.\n\n"
+    f"👥 <b>{kb.BTN_TEAM}</b> — admin va superadminlarni boshqarish.\n"
+    f"💳 <b>{kb.BTN_PAYMENTS}</b> — onlayn to'lovni yoqish (WLCM tokeni → API "
+    "kalitlari), webhook manzili va secret, ulanishni tekshirish.\n\n"
     "💡 <i>Har qanday oynada «⬅️ Orqaga» yoki «✖️ Yopish» bor. FSM (savol-javob) "
     "ichida esa «❌ Bekor qilish» yoki /cancel ishlatiladi.</i>"
 )
@@ -255,6 +259,7 @@ async def cmd_broadcast(message: Message, state: FSMContext, session: AsyncSessi
 _MENU_TEXTS = {
     kb.BTN_CATALOG, kb.BTN_ORDERS, kb.BTN_MARKETING, kb.BTN_SETTINGS,
     kb.BTN_ANALYTICS, kb.BTN_SHOP_STATUS, kb.BTN_TEAM, kb.BTN_SYSTEM,
+    kb.BTN_PAYMENTS,
 }
 
 
@@ -278,6 +283,8 @@ async def menu_router(message: Message, session: AsyncSession, state: FSMContext
         await _open_team(message)
     elif text == kb.BTN_SYSTEM:
         await _open_system(message)
+    elif text == kb.BTN_PAYMENTS:
+        await _open_payments(message)
 
 
 # ═════════════════════════════════════════════════════════════
@@ -2064,3 +2071,366 @@ async def roles_delete_do(callback: CallbackQuery, session: AsyncSession):
         text = f"🗑 <code>{tid}</code> barcha rollardan chiqarildi."
     await _edit(callback, text, kb.roles_menu_inline())
     await callback.answer("✅ Chiqarildi")
+
+
+
+# ═════════════════════════════════════════════════════════════
+#  TO'LOV TIZIMI (WLCM: Payme / Click / Uzum / Paylov)
+#
+#  WLCM do'kon egasiga odatda faqat TOKEN va PARTNER ID beradi. `api_key` va
+#  `api_secret` shu token yordamida GENERATSIYA qilinadi — bu bo'lim aynan shu
+#  jarayonni bot ichida bajaradi. Natijada olingan kalitlar bazaga saqlanadi,
+#  shuning uchun Railway env'ni tahrirlash va qayta deploy qilish SHART EMAS.
+#
+#  XAVFSIZLIK: maxfiy qiymatlar (token, api_key, api_secret, webhook secret)
+#  hech qachon to'liq ko'rsatilmaydi — faqat maskalangan holda. Kiritilgan
+#  qiymatli xabar esa darhol o'chiriladi (chatda qolib ketmasligi uchun).
+# ═════════════════════════════════════════════════════════════
+_PAY_FIELDS = {
+    "prod_token": ("🎫 WLCM tokeni", "prod_token"),
+    "webhook_secret": ("🔐 Webhook secret", "webhook_secret"),
+}
+
+
+async def _payments_text() -> str:
+    from core.config import (
+        PAYLOV_BASE_URL, PAYLOV_PROVIDERS, PAYLOV_WEBHOOK_URL,
+        PAYMENT_ALLOW_CASH, PAYMENT_TEST_MODE, PUBLIC_BASE_URL,
+    )
+    from core.services import payment_keys
+
+    await payment_keys.ensure_loaded(force=True)
+
+    keys_ready = payment_keys.enabled()
+    hook_ready = payment_keys.webhook_ready()
+
+    def _src(name: str) -> str:
+        s = payment_keys.source(name)
+        return {"env": " <i>(env)</i>", "bot": " <i>(bot)</i>"}.get(s, "")
+
+    if keys_ready and hook_ready:
+        status = "🟢 <b>To'liq ishlayapti</b> — mijozlar onlayn to'lov qila oladi"
+    elif keys_ready and not hook_ready:
+        status = (
+            "🟡 <b>Yarim tayyor</b> — kalitlar bor, lekin webhook secret yo'q.\n"
+            "   To'lov sahifasi ochiladi, ammo natija <b>tasdiqlanmaydi</b>."
+        )
+    else:
+        status = "🔴 <b>O'chiq</b> — mijozlarga faqat naqd to'lov ko'rsatiladi"
+
+    lines = [
+        "💳 <b>To'lov tizimi</b> (WLCM)",
+        "",
+        status,
+        "",
+        f"🌐 Server: <code>{esc(PAYLOV_BASE_URL)}</code>",
+        f"🏷 Partner ID: <code>{esc(payment_keys.partner_id()) or '—'}</code>{_src('partner_id')}",
+        f"🎫 Token: <code>{esc(payment_keys.mask(payment_keys.prod_token()))}</code>{_src('prod_token')}",
+        f"🔐 API key: <code>{esc(payment_keys.mask(payment_keys.api_key()))}</code>{_src('api_key')}",
+        f"🔑 API secret: <code>{esc(payment_keys.mask(payment_keys.api_secret()))}</code>{_src('api_secret')}",
+        f"📡 Webhook secret: <code>{esc(payment_keys.mask(payment_keys.webhook_secret()))}</code>{_src('webhook_secret')}",
+        "",
+        "📡 <b>Webhook manzili</b> — WLCM kabinetiga shuni bering:",
+    ]
+    if PUBLIC_BASE_URL:
+        lines.append(f"<code>{esc(PAYLOV_WEBHOOK_URL)}</code>")
+    else:
+        lines.append(
+            "❗️ Domen aniqlanmadi. Railway env'da <code>PUBLIC_BASE_URL</code> "
+            "yoki <code>WEBAPP_URL</code> ni to'ldiring."
+        )
+
+    lines += [
+        "",
+        f"💳 Usullar: <b>{esc(', '.join(PAYLOV_PROVIDERS))}</b>",
+        f"💵 Naqd to'lov: <b>{'yoqilgan' if PAYMENT_ALLOW_CASH else 'o‘chirilgan'}</b>",
+    ]
+    if PAYMENT_TEST_MODE and not keys_ready:
+        lines += [
+            "",
+            "⚠️ <b>DEMO REJIMI YOQILGAN</b> (<code>PAYMENT_TEST_MODE=true</code>)!\n"
+            "Mijoz onlayn usulni tanlashi bilan buyurtma <b>haqiqiy pul o'tmasdan</b> "
+            "to'langan deb belgilanadi. Ishlab chiqarishda darhol <code>false</code> qiling.",
+        ]
+
+    if not keys_ready:
+        lines += [
+            "",
+            "<b>Qanday yoqiladi:</b>",
+            "1️⃣ WLCM bergan <b>Token</b>ni kiriting.",
+            "2️⃣ <b>Tokenni tekshirish</b> — amaldaligini bilib oladi (tokenni sarflamaydi).",
+            "3️⃣ <b>API kalitlarini olish</b> — kalitlar yaratilib avtomatik saqlanadi.",
+            "4️⃣ Webhook manzilini WLCM'ga bering, ular bergan <b>secret</b>ni kiriting.",
+        ]
+    return "\n".join(lines)
+
+
+async def _payments_markup():
+    from core.services import payment_keys
+    return kb.payments_kb(
+        keys_ready=payment_keys.enabled(),
+        has_token=bool(payment_keys.prod_token()),
+        hook_ready=payment_keys.webhook_ready(),
+    )
+
+
+async def _open_payments(message: Message):
+    await message.answer(await _payments_text(), reply_markup=await _payments_markup())
+
+
+@router.message(Command("payments"))
+async def cmd_payments(message: Message, state: FSMContext):
+    await state.clear()
+    await _open_payments(message)
+
+
+@router.callback_query(F.data == "pay:menu")
+async def payments_menu_cb(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await _edit(callback, await _payments_text(), await _payments_markup())
+    await callback.answer("🔄 Yangilandi")
+
+
+@router.callback_query(F.data == "pay:token")
+async def payments_ask_token(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(PaymentSetup.value)
+    await state.update_data(field="prod_token")
+    await callback.message.answer(
+        "🎫 <b>WLCM tokenini yuboring</b>\n\n"
+        "Bu WLCM (wlcm.uz) hamkorlik kabinetidan olingan <b>onboarding token</b>.\n"
+        "U orqali <code>api_key</code> va <code>api_secret</code> yaratiladi.\n\n"
+        "⚠️ Token <b>cheklangan martalik</b> — uni hech kimga bermang. "
+        "Yuborgan xabaringiz xavfsizlik uchun <b>avtomatik o'chiriladi</b>.",
+        reply_markup=kb.cancel_menu(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "pay:hook")
+async def payments_ask_hook(callback: CallbackQuery, state: FSMContext):
+    from core.config import PAYLOV_WEBHOOK_URL, PUBLIC_BASE_URL
+
+    hook_url = PAYLOV_WEBHOOK_URL if PUBLIC_BASE_URL else "(domen aniqlanmadi)"
+    await state.set_state(PaymentSetup.value)
+    await state.update_data(field="webhook_secret")
+    await callback.message.answer(
+        "🔐 <b>Webhook secret'ni yuboring</b>\n\n"
+        "Bu qiymatni WLCM webhook manzilini ro'yxatga olgandan <b>keyin</b> beradi.\n\n"
+        "📡 Webhook manzili:\n"
+        f"<code>{esc(hook_url)}</code>\n\n"
+        "⚠️ Secret bo'lmasa to'lov natijasi <b>tasdiqlanmaydi</b> — bu ataylab "
+        "shunday: imzosi tekshirilmagan xabar orqali buyurtmani \"to'langan\" "
+        "qilib qo'yish mumkin bo'lmasligi kerak.\n\n"
+        "Yuborgan xabaringiz avtomatik o'chiriladi.",
+        reply_markup=kb.cancel_menu(),
+    )
+    await callback.answer()
+
+
+@router.message(PaymentSetup.value, F.text)
+async def payments_value_received(message: Message, state: FSMContext):
+    from core.services import payment_keys
+
+    data = await state.get_data()
+    field = data.get("field") or ""
+    value = (message.text or "").strip()
+
+    # Maxfiy qiymat chatda qolib ketmasligi uchun xabarni darhol o'chiramiz.
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    if field not in _PAY_FIELDS:
+        await state.clear()
+        await message.answer("❗️ Noma'lum maydon.", reply_markup=kb.main_menu())
+        return
+
+    if len(value) < 8:
+        # Holat SAQLANADI — qayta so'raymiz.
+        await message.answer(
+            "❗️ Qiymat juda qisqa ko'rinadi (kamida 8 belgi). Qayta yuboring "
+            "yoki «❌ Bekor qilish»."
+        )
+        return
+
+    label, key_name = _PAY_FIELDS[field]
+    await payment_keys.save_one(key_name, value)
+    await payment_keys.ensure_loaded(force=True)
+    await state.clear()
+
+    note = ""
+    if key_name == "prod_token":
+        note = (
+            "\n\nEndi <b>«🔍 Tokenni tekshirish»</b>, so'ng "
+            "<b>«🔑 API kalitlarini olish»</b> tugmasini bosing."
+        )
+    await message.answer(
+        f"✅ Saqlandi: <b>{label}</b>\n"
+        f"Qiymat: <code>{esc(payment_keys.mask(value))}</code>{note}",
+        reply_markup=kb.main_menu(),
+    )
+    await message.answer(await _payments_text(), reply_markup=await _payments_markup())
+
+
+@router.callback_query(F.data == "pay:check")
+async def payments_check_token(callback: CallbackQuery):
+    from core.services.paylov_onboarding import OnboardingError, validate_token
+
+    await callback.answer("🔍 Tekshirilmoqda…")
+    try:
+        path, info = await validate_token()
+    except OnboardingError as e:
+        await _edit(
+            callback,
+            "🔍 <b>Token tekshiruvi</b>\n\n"
+            f"❌ Muvaffaqiyatsiz:\n<code>{esc(str(e)[:500])}</code>",
+            kb.payments_back_kb(),
+        )
+        return
+    except Exception as e:
+        logger.exception("Token tekshirishda kutilmagan xato: %s", e)
+        await _edit(
+            callback,
+            f"🔍 <b>Token tekshiruvi</b>\n\n❌ Kutilmagan xato: <code>{esc(str(e)[:300])}</code>",
+            kb.payments_back_kb(),
+        )
+        return
+
+    await _edit(
+        callback,
+        "🔍 <b>Token tekshiruvi</b>\n\n"
+        "✅ Token <b>amalda</b>!\n"
+        f"🔗 Endpoint: <code>{esc(path)}</code>\n"
+        f"📨 Javob: <code>{esc(str(info)[:200])}</code>\n\n"
+        "Endi <b>«🔑 API kalitlarini olish»</b> tugmasi orqali kalit yaratishingiz mumkin.",
+        kb.payments_back_kb(),
+    )
+
+
+@router.callback_query(F.data == "pay:gen")
+async def payments_generate(callback: CallbackQuery):
+    """Tokenni SARFLAB api_key/api_secret oladi va bazaga saqlaydi."""
+    from core.services import payment_keys, settings_service
+    from core.services.paylov_onboarding import OnboardingError, onboard_and_save
+
+    await payment_keys.ensure_loaded(force=True)
+    if payment_keys.enabled():
+        await callback.answer("Kalitlar allaqachon o'rnatilgan.", show_alert=True)
+        return
+
+    await callback.answer("🔑 Kalitlar yaratilmoqda…")
+    await _edit(callback, "⏳ WLCM bilan bog'lanilmoqda…")
+
+    shop = (await settings_service.get("shop_name", "") or "gunesh").strip()
+    # Kalit nomi sifatida do'kon nomidan xavfsiz slug yasaymiz.
+    slug = "".join(ch if ch.isalnum() else "-" for ch in shop.lower()).strip("-") or "gunesh"
+
+    try:
+        info = await onboard_and_save(name=f"{slug[:24]}-prod")
+    except OnboardingError as e:
+        await _edit(
+            callback,
+            "🔑 <b>API kalitlarini olish</b>\n\n"
+            f"❌ Xatolik:\n<code>{esc(str(e)[:500])}</code>\n\n"
+            "Token amaldaligini «🔍 Tokenni tekshirish» bilan tasdiqlang yoki "
+            "WLCM bilan bog'laning.",
+            kb.payments_back_kb(),
+        )
+        return
+    except Exception as e:
+        logger.exception("Onboardingda kutilmagan xato: %s", e)
+        await _edit(
+            callback,
+            f"🔑 <b>API kalitlarini olish</b>\n\n❌ Kutilmagan xato: "
+            f"<code>{esc(str(e)[:300])}</code>",
+            kb.payments_back_kb(),
+        )
+        return
+
+    await _edit(
+        callback,
+        "✅ <b>Kalitlar yaratildi va saqlandi!</b>\n\n"
+        f"🆔 Key ID: <code>{esc(str(info.get('id', '—')))}</code>\n"
+        f"🏷 Nomi: <code>{esc(str(info.get('name', '—')))}</code>\n"
+        f"🔐 API key: <code>{esc(payment_keys.mask(payment_keys.api_key()))}</code>\n\n"
+        "Kalitlar bazaga yozildi — Railway env'ni tahrirlash <b>shart emas</b>.\n"
+        "Xavfsizlik uchun to'liq qiymat ko'rsatilmaydi.\n\n"
+        "🔜 <b>Keyingi qadam:</b> webhook manzilini WLCM'ga bering va ular bergan "
+        "<b>secret</b>ni «🔐 Webhook secret» orqali kiriting — shundan keyingina "
+        "to'lovlar avtomatik tasdiqlanadi.",
+        kb.payments_back_kb(),
+    )
+
+
+@router.callback_query(F.data == "pay:test")
+async def payments_test(callback: CallbackQuery):
+    """Joriy kalitlar bilan GET /me chaqiradi — ulanish ishlashini tasdiqlaydi."""
+    from core.services import payment_keys
+    from core.services.paylov import PaylovError, get_me
+
+    await payment_keys.ensure_loaded(force=True)
+    if not payment_keys.enabled():
+        await callback.answer("Kalitlar o'rnatilmagan.", show_alert=True)
+        return
+
+    await callback.answer("🔌 Tekshirilmoqda…")
+    try:
+        me = await get_me()
+    except PaylovError as e:
+        await _edit(
+            callback,
+            "🔌 <b>Ulanish testi</b>\n\n"
+            f"❌ Muvaffaqiyatsiz:\n<code>{esc(str(e)[:500])}</code>\n\n"
+            "Sabablari: kalitlar noto'g'ri, IP whitelist yoki partner faol emas.",
+            kb.payments_back_kb(),
+        )
+        return
+    except Exception as e:
+        logger.exception("Ulanish testida kutilmagan xato: %s", e)
+        await _edit(
+            callback,
+            f"🔌 <b>Ulanish testi</b>\n\n❌ Kutilmagan xato: <code>{esc(str(e)[:300])}</code>",
+            kb.payments_back_kb(),
+        )
+        return
+
+    api_keys = me.get("api_keys") or []
+    await _edit(
+        callback,
+        "🔌 <b>Ulanish testi</b>\n\n"
+        "✅ Kalitlar <b>ishlayapti</b>!\n\n"
+        f"🏷 Partner: <b>{esc(str(me.get('name', '—')))}</b>\n"
+        f"🆔 ID: <code>{esc(str(me.get('id', '—')))}</code>\n"
+        f"📦 Faol: <b>{'ha' if me.get('is_active') else 'yo‘q'}</b>\n"
+        f"🗝 API kalitlar soni: <b>{len(api_keys)}</b>",
+        kb.payments_back_kb(),
+    )
+
+
+@router.callback_query(F.data == "pay:wipe")
+async def payments_wipe_ask(callback: CallbackQuery):
+    await _edit(
+        callback,
+        "🗑 <b>Kalitlarni tozalash</b>\n\n"
+        "Bazadagi barcha to'lov kalitlari (token, api_key, api_secret, webhook "
+        "secret) o'chiriladi va <b>onlayn to'lov o'chadi</b> — mijozlarga faqat "
+        "naqd to'lov ko'rsatiladi.\n\n"
+        "ℹ️ Railway env'dagi qiymatlarga ta'sir qilmaydi.\n"
+        "⚠️ Yangi kalit olish uchun WLCM'dan <b>yangi token</b> kerak bo'ladi "
+        "(eski token sarflangan).\n\n"
+        "Davom etamizmi?",
+        kb.confirm_kb("pay:wipeok", "pay:menu"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "pay:wipeok")
+async def payments_wipe_do(callback: CallbackQuery):
+    from core.services import payment_keys
+
+    await payment_keys.clear_all()
+    await payment_keys.ensure_loaded(force=True)
+    logger.warning("🗑 To'lov kalitlari tozalandi (superadmin=%s)", callback.from_user.id)
+    await _edit(callback, await _payments_text(), await _payments_markup())
+    await callback.answer("🗑 Tozalandi")

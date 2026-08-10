@@ -191,6 +191,20 @@ PAYLOV_API_KEY = (os.getenv("API_KEY") or os.getenv("PAYLOV_API_KEY", "") or "")
 PAYLOV_API_SECRET = (os.getenv("API_SECRET") or os.getenv("PAYLOV_API_SECRET", "") or "").strip()
 PAYLOV_PARTNER_ID = (os.getenv("PARTNER_ID") or os.getenv("PAYLOV_PARTNER_ID", "") or "").strip()
 
+# Onboarding token — WLCM odatda do'kon egasiga faqat SHU tokenni va Partner ID'ni
+# beradi. `api_key`/`api_secret` shu token yordamida generatsiya qilinadi
+# (Super Admin bot → «💳 To'lov tizimi»). Token CHEKLANGAN MARTALIK.
+PAYLOV_PROD_TOKEN = (os.getenv("PROD_TOKEN") or os.getenv("PAYLOV_PROD_TOKEN", "") or "").strip()
+
+# Onboarding endpoint yo'li. Hujjatda `partners/onboarding/` deyilgan; server
+# boshqa yo'l ishlatsa WLCM_ONBOARDING_PATH bilan o'zgartiriladi (kod bir nechta
+# nomzodni ham navbatma-navbat sinaydi).
+PAYLOV_ONBOARDING_PATH = (
+    os.getenv("WLCM_ONBOARDING_PATH")
+    or os.getenv("PAYLOV_ONBOARDING_PATH")
+    or "/api/v1/partners/onboarding/"
+).strip()
+
 # Webhook imzo maxfiy kaliti (WLCM webhookni ulagandan keyin beradi).
 # Webhook haqiqatan WLCM'dan kelganini HMAC-SHA256 orqali tasdiqlash uchun.
 # XAVFSIZLIK: bo'sh bo'lsa webhook RAD ETILADI (soxta "to'landi" xabari bilan
@@ -219,7 +233,10 @@ CUSTOMER_BOT_USERNAME = (os.getenv("BOT_CUSTOMER_USERNAME", "") or "").strip().l
 # aniqlangach) yoki Mini App domeni ishlatiladi.
 PAYLOV_RETURN_URL = (os.getenv("PAYLOV_RETURN_URL", "") or "").strip()
 
-# To'lov tizimi sozlanganmi (kalitlar bormi).
+# To'lov tizimi ENV orqali sozlanganmi.
+# DIQQAT: bu FAQAT env holatini ko'rsatadi. Kalitlar Super Admin bot orqali ham
+# saqlanishi mumkin (payment_credentials jadvali), shuning uchun kodda haqiqiy
+# holat `core.services.payment_keys.enabled()` bilan tekshiriladi.
 PAYLOV_ENABLED = bool(PAYLOV_API_KEY and PAYLOV_API_SECRET)
 
 # SINOV rejimi: kalitlar YO'Q bo'lsa, onlayn provayder tanlanishi bilan buyurtma

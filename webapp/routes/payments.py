@@ -56,7 +56,7 @@ async def paylov_webhook(request: Request):
 
     from core.services.payment_service import process_webhook, verify_webhook_signature
 
-    valid, reason = verify_webhook_signature(payload or {})
+    valid, reason = await verify_webhook_signature(payload or {})
     if not valid:
         # Imzo noto'g'ri yoki secret sozlanmagan — soxta/buzilgan so'rov.
         # Buyurtma TO'LANGAN deb BELGILANMAYDI.
@@ -70,7 +70,7 @@ async def paylov_webhook(request: Request):
                 content={
                     "ok": False,
                     "error": "webhook_secret_not_configured",
-                    "detail": "PAYLOV_WEBHOOK_SECRET env sozlanmagan.",
+                    "detail": "Webhook secret sozlanmagan (admin sozlashi kerak).",
                 },
             )
         return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_signature"})
