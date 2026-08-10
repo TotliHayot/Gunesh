@@ -57,6 +57,13 @@ _db: dict[str, str] = {}      # bazadagi qiymatlar
 _loaded_at: float = 0.0
 _lock = asyncio.Lock()
 
+# Oxirgi o'qish natijasi — diagnostika uchun. "Bazada kalit yo'q" va "bazani
+# o'qib bo'lmadi" holatlarini AJRATIB ko'rsatish imkonini beradi (ikkalasida
+# ham qiymatlar bo'sh ko'rinadi, lekin sabab va yechim butunlay boshqa).
+_last_load_ok: bool = False
+_last_load_error: str = ""
+_db_row_count: int = 0
+
 
 async def ensure_loaded(force: bool = False) -> None:
     """Bazadagi kalitlarni keshga yuklaydi (TTL bilan)."""
@@ -66,6 +73,7 @@ async def ensure_loaded(force: bool = False) -> None:
     async with _lock:
         if not force and _loaded_at and (time.time() - _loaded_at) < _CACHE_TTL:
             return
+        global _last_load_ok, _last_load_error, _db_row_count
         try:
             from core.database import AsyncSessionLocal
             from core.models.payment_credential import PaymentCredential
@@ -75,9 +83,14 @@ async def ensure_loaded(force: bool = False) -> None:
             _db.clear()
             _db.update({r.key: (r.value or "") for r in rows})
             _loaded_at = time.time()
+            _last_load_ok = True
+            _last_load_error = ""
+            _db_row_count = sum(1 for v in _db.values() if v)
         except Exception as e:
             # Baza hali tayyor bo'lmasa (masalan migratsiyadan oldin) — env bilan
             # ishlaymiz. Keyingi chaqiruvda qayta urinamiz.
+            _last_load_ok = False
+            _last_load_error = f"{type(e).__name__}: {e}"[:200]
             logger.warning("To'lov kalitlarini bazadan o'qib bo'lmadi: %s", e)
 
 
@@ -174,6 +187,16 @@ async def clear_all() -> None:
     """Bazadagi barcha kalitlarni tozalaydi (env'ga ta'sir qilmaydi)."""
     await _write({k: "" for k in _ENV})
     logger.info("🔑 Bazadagi to'lov kalitlari tozalandi.")
+
+
+def load_status() -> tuple[bool, int, str]:
+    """Bazadan o'qish holati: (muvaffaqiyatli, saqlangan_qiymatlar_soni, xato).
+
+    Diagnostika uchun: panelda hamma qiymat "—" bo'lsa, sabab ikki xil bo'lishi
+    mumkin — baza bo'sh (kalitlar kiritilmagan/o'chirilgan) yoki bazani o'qib
+    bo'lmadi (jadval yo'q, ulanish uzilgan). Yechim ham boshqa-boshqa.
+    """
+    return _last_load_ok, _db_row_count, _last_load_error
 
 
 def mask(value: str, head: int = 6, tail: int = 4) -> str:
