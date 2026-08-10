@@ -502,10 +502,14 @@ def payments_kb(*, keys_ready: bool, has_token: bool, hook_ready: bool,
     rows: list[list[InlineKeyboardButton]] = []
 
     if not keys_ready:
-        rows.append([_btn("🎫 WLCM tokenini kiritish", "pay:token")])
+        # Token bor bo'lsa (odatda PROD_TOKEN env'dan) — onboarding 2 bosqichi
+        # BIRINCHI o'rinda. Tokenni qo'lda kiritish — faqat zaxira variant.
         if has_token:
             rows.append([_btn("🔍 Tokenni tekshirish", "pay:check")])
             rows.append([_btn("🔑 API kalitlarini olish", "pay:gen")])
+            rows.append([_btn("🎫 Tokenni almashtirish", "pay:token")])
+        else:
+            rows.append([_btn("🎫 WLCM tokenini kiritish", "pay:token")])
     else:
         rows.append([_btn("🔌 Ulanishni tekshirish", "pay:test")])
 

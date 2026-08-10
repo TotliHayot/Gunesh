@@ -97,7 +97,34 @@ beradi. `api_key` / `api_secret` esa shu token yordamida **generatsiya qilinadi*
 Bu jarayon bot ichida bajariladi — Railway env'ni tahrirlash va qayta deploy
 qilish **shart emas**.
 
-**Super Admin bot → «💳 To'lov tizimi»** (yoki `/payments`):
+### Tavsiya etilgan tartib (IntizomAi bilan bir xil)
+
+WLCM sizga **Token** va **Partner ID** beradi. Ularni avval Railway env'ga
+qo'yasiz, keyin bot qolganini o'zi qiladi:
+
+**1-qadam — Railway → Variables:**
+```
+PROD_TOKEN=<WLCM bergan Token>
+PARTNER_ID=<WLCM bergan Partner ID>    # ixtiyoriy, faqat ma'lumot uchun
+```
+Railway o'zi qayta deploy qiladi.
+
+**2-qadam — Super Admin bot → «💳 To'lov tizimi»** (`/payments`) → onboarding
+**2 bosqichli**:
+1. **🔍 Tokenni tekshirish** — token amaldaligini bilib oladi, **sarflamaydi**
+2. **🔑 API kalitlarini olish** — `API_KEY` va `API_SECRET` yaratiladi, bazaga
+   saqlanadi **va** nusxalash uchun qulay ko'rinishda sizga yuboriladi
+
+**3-qadam** — yuborilgan `API_KEY` va `API_SECRET` ni ham Railway → Variables ga
+qo'yasiz (zaxira uchun — token bir martalik, baza qayta yaratilsa yo'qolmasin).
+
+`PROD_TOKEN` env'da bo'lmasa panel buni aniq aytadi:
+> ❌ **PROD_TOKEN topilmadi.** Railway → Variables ga WLCM bergan Tokenni qo'shing.
+
+> Tokenni env'ga qo'ymasdan, to'g'ridan-to'g'ri botga yuborish ham mumkin
+> («🎫 WLCM tokenini kiritish») — lekin env orqali berish tavsiya etiladi.
+
+### Barcha tugmalar
 
 | Qadam | Tugma | Nima bo'ladi |
 |---|---|---|
