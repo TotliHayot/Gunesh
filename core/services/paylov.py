@@ -43,6 +43,19 @@ class PaylovError(Exception):
     status_code: int | None = None
 
 
+def _hint(status_code: int) -> str:
+    """HTTP kodiga qarab sabab haqida maslahat (diagnostikani tezlashtiradi)."""
+    hints = {
+        401: (
+            " — Sabablari: kalitlar noto'g'ri, IMZO noto'g'ri, yoki X-Timestamp "
+            "300 soniyadan farq qiladi (server vaqti noto'g'ri bo'lishi mumkin)."
+        ),
+        403: " — Sabablari: IP whitelist mos emas, yoki partner faol/tasdiqlangan emas.",
+        422: " — Yuborilgan maydonlar validatsiyadan o'tmadi (masalan return_url yoki amount).",
+    }
+    return hints.get(status_code, "")
+
+
 def _canonical_path(path: str, query_string: str = "") -> str:
     params = sorted(parse_qsl(query_string, keep_blank_values=True))
     encoded = urlencode(params)
@@ -109,7 +122,7 @@ async def _request(method: str, path: str, payload: dict | None = None) -> dict:
 
     if resp.status_code >= 400:
         logger.error("❌ To'lov API %s %s → %s: %s", method, path, resp.status_code, resp.text[:400])
-        err = PaylovError(f"To'lov API {resp.status_code}: {resp.text[:200]}")
+        err = PaylovError(f"To'lov API {resp.status_code}: {resp.text[:200]}{_hint(resp.status_code)}")
         err.status_code = resp.status_code
         raise err
 
@@ -126,13 +139,15 @@ async def get_me() -> dict:
     """
     Partner ma'lumotlari — kalitlarni tekshirish uchun.
 
-    /me yo'li hujjatlarda ziddiyatli ko'rsatilgan (bir joyda `/partners/me`,
-    boshqa joyda `/integrations/me`). Shu sabab nomzodlarni navbatma-navbat
-    sinaymiz: 404 bo'lsa keyingisiga o'tamiz, boshqa xato bo'lsa darhol uzatamiz.
+    /me yo'li hujjatlarda ziddiyatli ko'rsatilgan: "GET /me" sahifasida
+    `/partners/me`, imzo namunalarida (Python/Bash) esa aynan
+    `/api/v1/integrations/me` ishlatilgan. Imzo namunalari eng ishonchli manba
+    (ular bajarilishi mumkin bo'lgan kod), shuning uchun u BIRINCHI sinaladi.
+    404 bo'lsa keyingisiga o'tamiz, boshqa xato bo'lsa darhol uzatamiz.
     """
     candidates = [
-        f"{API_PREFIX}/partners/me",
         f"{API_PREFIX}/integrations/me",
+        f"{API_PREFIX}/partners/me",
         f"{API_PREFIX}/me",
     ]
     last_err: PaylovError | None = None
@@ -148,20 +163,29 @@ async def get_me() -> dict:
 
 
 async def create_checkout(external_id: str, amount_tiyin: int,
-                          return_url: str | None = None,
+                          return_url: str,
                           provider: str | None = None) -> dict:
     """
     Checkout (to'lov sahifasi) yaratadi.
 
-    amount_tiyin — TIYINDA (so'm * 100). Javob: {order_id, checkout_url, ...}
+    amount_tiyin — TIYINDA (so'm * 100), 0 dan katta bo'lishi shart.
+    external_id  — max 100 belgi (hujjat talabi).
+    return_url   — MAJBURIY maydon (hujjatda "Majburiy: Ha"). Bo'sh yuborilsa
+                   API 422 (validation error) qaytaradi.
+
+    Javob (201): {order_id, external_id, state, checkout_url, message}
     """
+    if not return_url:
+        raise PaylovError(
+            "return_url bo'sh — bu maydon majburiy. PAYLOV_RETURN_URL env'ini "
+            "yoki bot username'ini sozlang."
+        )
     payload = {
-        "external_id": external_id,
+        "external_id": str(external_id)[:100],
         "amount": int(amount_tiyin),
         "payment_provider": (provider or PAYLOV_PROVIDER),
+        "return_url": return_url,
     }
-    if return_url:
-        payload["return_url"] = return_url
     return await _request("POST", f"{API_PREFIX}/integrations/checkout", payload)
 
 
