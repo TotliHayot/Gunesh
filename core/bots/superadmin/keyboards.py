@@ -510,6 +510,12 @@ def payments_kb(*, keys_ready: bool, has_token: bool, hook_ready: bool,
             rows.append([_btn("🎫 Tokenni almashtirish", "pay:token")])
         else:
             rows.append([_btn("🎫 WLCM tokenini kiritish", "pay:token")])
+        # Kalitlar tayyor holda qo'lga tegsa (masalan token sarflangan bo'lsa,
+        # Paylov ularni to'g'ridan-to'g'ri yuborsa) — tokensiz ham kiritish yo'li.
+        rows.append([
+            _btn("🔐 API key", "pay:apikey"),
+            _btn("🔑 API secret", "pay:apisecret"),
+        ])
     else:
         rows.append([_btn("🔌 Ulanishni tekshirish", "pay:test")])
 
