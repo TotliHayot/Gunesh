@@ -2107,6 +2107,7 @@ async def _payments_text() -> str:
 
     keys_ready = payment_keys.enabled()
     hook_ready = payment_keys.webhook_ready()
+    has_token = bool(payment_keys.prod_token())
 
     def _src(name: str) -> str:
         s = payment_keys.source(name)
@@ -2174,14 +2175,33 @@ async def _payments_text() -> str:
         ]
 
     if not keys_ready:
+        # IntizomAi bilan bir xil: onboarding 2 BOSQICHLI va token ENV'dan olinadi.
         lines += [
             "",
-            "<b>Qanday yoqiladi:</b>",
-            "1️⃣ WLCM bergan <b>Token</b>ni kiriting.",
-            "2️⃣ <b>Tokenni tekshirish</b> — amaldaligini bilib oladi (tokenni sarflamaydi).",
-            "3️⃣ <b>API kalitlarini olish</b> — kalitlar yaratilib avtomatik saqlanadi.",
-            "4️⃣ Webhook manzilini WLCM'ga bering, ular bergan <b>secret</b>ni kiriting.",
+            "<b>Onboarding (2 bosqichli):</b>",
+            "1️⃣ <b>🔍 Tokenni tekshirish</b> — token amaldaligini bilib oladi "
+            "(tokenni <b>sarflamaydi</b>).",
+            "2️⃣ <b>🔑 API kalitlarini olish</b> — <code>API_KEY</code> va "
+            "<code>API_SECRET</code> yaratiladi va sizga yuboriladi.",
+            "",
+            "⚠️ Token <b>cheklangan martalik</b>. «Olish» tugmasi tokenni "
+            "sarflaydi — faqat <b>bir marta</b> bosing va kalitlarni darhol "
+            "Railway env'ga qo'ying.",
         ]
+        if not has_token:
+            lines += [
+                "",
+                "❌ <b>PROD_TOKEN topilmadi.</b>",
+                "Railway → <b>Variables</b> ga WLCM bergan Tokenni qo'shing:",
+                "<code>PROD_TOKEN</code>",
+                "(ixtiyoriy: <code>PARTNER_ID</code>, <code>Base_URL</code>)",
+                "",
+                "Railway o'zi qayta deploy qiladi — so'ng shu bo'limda "
+                "<b>«🔄 Yangilash»</b> tugmasini bosing.",
+                "",
+                "<i>Yoki tokenni env'ga qo'ymasdan shu botga yuborishingiz ham "
+                "mumkin — «🎫 WLCM tokenini kiritish».</i>",
+            ]
     elif not hook_ready:
         # Kalitlar bor, alohida webhook secret yo'q — nima bo'lishini aytamiz.
         lines += [
