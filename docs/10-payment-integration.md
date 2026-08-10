@@ -108,6 +108,23 @@ qilish **shart emas**.
 | 5 | 🔐 Webhook secret | Ular bergan secret kiritiladi. |
 | ✅ | 🔌 Ulanishni tekshirish | `GET /me` bilan kalitlarni tasdiqlaydi va **Partner ID'ni avtomatik saqlaydi**. |
 
+### Onboardingdan keyin kalitlar ko'rsatiladi
+
+«🔑 API kalitlarini olish» tugmasi kalitlarni bazaga saqlaydi **va** darhol
+nusxalash uchun qulay ko'rinishda yuboradi:
+
+```
+API_KEY=wlcm_...
+API_SECRET=...
+```
+
+Har bir qiymat alohida `<code>` blokda — Telegram'da bir bosishda nusxa olinadi.
+Ularni **Railway → Variables** ga ham qo'yish tavsiya etiladi (onboarding tokeni
+bir martalik — baza qayta yaratilsa kalitlar yo'qoladi).
+
+Kalitlar bazada bo'lgani uchun **redeploy kutmasdan darhol ishlaydi**; env'ga
+qo'ygandan keyin esa env qiymati ustun bo'ladi.
+
 ### Webhook secret'ni qanday olish kerak
 
 Hujjatda webhook URL «**partner tomonidan ko'rsatiladi**» deyilgan
@@ -118,8 +135,13 @@ Shu sabab kalitlarni bergan xat egalariga yozib, ikki narsani so'rash kerak:
 1. bot ko'rsatgan **webhook manzilini** to'lov bildirishnomalari uchun ro'yxatga olish;
 2. webhook imzosi uchun **secret** kalitini yuborish.
 
-⚠️ Secret **`api_secret` dan boshqa qiymat** — hujjat uni alohida sozlama
-(`PAYLOV_WEBHOOK_SECRET`) sifatida ko'rsatadi. Taxmin qilmang, so'rang.
+**Lekin avval shunchaki sinab ko'ring!** Kod webhook imzosini `api_secret`
+bilan ham tekshiradi (10.10 → Webhook). Agar provayder shu bilan imzolasa,
+alohida secret **umuman kerak emas** va to'lovlar darhol avtomatik tasdiqlanadi.
+
+Shuning uchun tartib: kichik summa bilan bitta to'lov qiling →
+- buyurtma avtomatik to'langan bo'lsa ✅ tayyor;
+- bot «to'lov tasdiqlanmadi» xabarini yuborsa → Paylov'dan alohida secret so'rang.
 
 ### Kalitlarni env'ga zaxira nusxalash
 
@@ -301,8 +323,22 @@ Payload: `external_id`, `order_id`, `payment_id`, `amount`, `state`, `provider`,
 
 ```
 imzo_matni = "{order_id}:{payment_id}:{state}:{timestamp}"
-signature  = HMAC_SHA256(key=webhook_secret, msg=imzo_matni).hexdigest()
+signature  = HMAC_SHA256(key=<secret>, msg=imzo_matni).hexdigest()
 ```
+
+**Qaysi `<secret>`?** Hujjat buni aniq aytmaydi — u faqat
+`PAYLOV_WEBHOOK_SECRET` degan sozlama nomini ko'rsatadi, lekin uni qanday olish
+kerakligini tushuntirmaydi. Amalda ikki variant bo'lishi mumkin: provayder
+alohida webhook secret beradi, yoki webhookni **`api_secret`** bilan imzolaydi.
+
+Shu sabab kod **ikkalasini ham sinaydi**: avval alohida `webhook_secret` (agar
+sozlangan bo'lsa), keyin `api_secret`. Qaysi biri to'g'ri kelgani **logga**
+yoziladi — shundan keyin haqiqatni bilib olasiz.
+
+Bu xavfsizlikni susaytirmaydi: to'g'ri HMAC yasash uchun kalitni bilish shart,
+kalit esa faqat bizda va provayderda bor. Ikki nomzodni sinash faqat "qaysi
+kalit ishlatilgan" noaniqligini hal qiladi. Hech qanday kalit bo'lmasa — webhook
+baribir **rad etiladi** (fail-closed).
 
 - `amount` matn ko'rinishida keladi (masalan `"12000.00"`) — kod uni **so'm ham,
   tiyin ham** deb talqin qilib solishtiradi.
@@ -365,6 +401,7 @@ Bu integratsiya IntizomAi loyihasidagi pattern asosida yozilgan. Farqlar
 | Onboarding | `onboard.py` CLI + `/admin` → kalitlarni **chatda ko'rsatadi** | Bot ichida, kalitlar **avtomatik saqlanadi**; ko'rsatish — ixtiyoriy (zaxira uchun) |
 | Kalit olgandan keyin | Qo'lda env'ga ko'chirish + **redeploy** | Darhol ishlaydi (redeploy kerak emas) |
 | Webhook secret | Faqat env, botda kiritish imkoni **yo'q** | Bot orqali ham kiritiladi |
+| Webhook imzo kaliti | Faqat `webhook_secret` | `webhook_secret` **yoki** `api_secret` (ikkalasi sinaladi) |
 | Sirlar ko'rsatilishi | To'liq ko'rsatiladi | Faqat maskalangan (`AK_gen…3456`); to'liq ko'rish alohida tugma orqali |
 | Webhook rad etilsa | **Hech kim xabardor bo'lmaydi** | **Adminlarga xabar** + tayyor `/tolov` buyrug'i |
 | Qo'lda tasdiqlash | `/admin` → «💳 To'lovni faollashtirish» | Admin bot → «💳 To'lovni tasdiqlash» yoki `/tolov` |
@@ -379,5 +416,8 @@ Bundan tashqari IntizomAi'da webhook rad etilganda **adminlarga xabar
 berilmaydi**, ya'ni mijoz to'lagan pul e'tibordan chetda qolishi mumkin. Bizda
 bu tuzatilgan (10.6 → «🟡 holatda pul yo'qolmaydi»).
 
-Xulosa: webhook secret'ni **faqat Paylov/WLCM jamoasidan olish** mumkin — bu
-kod bilan hal qiladigan masala emas.
+Bizda bu muammo **yumshatilgan**: webhook imzosi `api_secret` bilan ham
+tekshiriladi (10.10 → Webhook). Agar provayder webhookni api_secret bilan
+imzolasa — alohida secret umuman kerak emas. Aks holda uni Paylov jamoasidan
+so'rash kerak, lekin har qanday holatda pul yo'qolmaydi (adminlarga xabar
+beriladi va `/tolov` orqali qo'lda tasdiqlanadi).

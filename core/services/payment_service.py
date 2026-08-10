@@ -91,23 +91,36 @@ async def verify_webhook_signature(payload: dict) -> tuple[bool, str]:
 
     Formula:
         message  = "{order_id}:{payment_id}:{state}:{timestamp}"
-        expected = HMAC_SHA256(key=<webhook_secret>, msg=message).hexdigest()
+        signature = HMAC_SHA256(key=<secret>, msg=message).hexdigest()
 
-    Secret env (`PAYLOV_WEBHOOK_SECRET`) yoki Super Admin bot orqali saqlangan
-    qiymatdan olinadi — shu sabab funksiya async (kalitlar ish vaqtida yuklanadi).
+    IKKI KALIT SINALADI:
+      1. `webhook_secret` — WLCM webhook uchun alohida bergan secret (agar bor);
+      2. `api_secret` — ba'zi provayderlar webhookni AYNAN api_secret bilan
+         imzolaydi. Hujjatda bu aniq yozilmagan, shu sabab ikkalasini ham
+         sinaymiz va qaysi biri to'g'ri kelganini LOGGA yozamiz.
 
-    Qaytaradi: (valid, reason).
-      • secret sozlanmagan → (False, "secret_not_set") — FAIL-CLOSED, ya'ni
-        webhook RAD ETILADI. Aks holda kim xohlasa "to'landi" xabari yuborib
-        bepul buyurtma olishi mumkin bo'lardi.
+    Bu XAVFSIZ: to'g'ri HMAC yasash uchun kalitni bilish shart, kalit esa faqat
+    bizda va provayderda bor. Ikki nomzodni sinash himoyani susaytirmaydi —
+    faqat "qaysi kalit ishlatilgan" noaniqligini hal qiladi.
+
+    Qaytaradi: (valid, reason). reason: ok | no_signature | mismatch |
+    secret_not_set. Hech qanday kalit bo'lmasa → FAIL-CLOSED (rad etiladi).
     """
     await payment_keys.ensure_loaded()
-    secret = payment_keys.webhook_secret()
-    if not secret:
+
+    # Nomzod kalitlar: aniq webhook secret ustuvor, keyin api_secret.
+    candidates: list[tuple[str, str]] = []
+    hook_secret = payment_keys.webhook_secret()
+    api_secret_val = payment_keys.api_secret()
+    if hook_secret:
+        candidates.append(("webhook_secret", hook_secret))
+    if api_secret_val and api_secret_val != hook_secret:
+        candidates.append(("api_secret", api_secret_val))
+
+    if not candidates:
         logger.critical(
-            "🚨 Webhook secret sozlanmagan! Webhook RAD ETILDI. WLCM bergan "
-            "secret'ni Super Admin bot → «💳 To'lov tizimi» orqali kiriting "
-            "(yoki Railway env'da PAYLOV_WEBHOOK_SECRET)."
+            "🚨 Hech qanday to'lov kaliti sozlanmagan! Webhook RAD ETILDI. "
+            "Super Admin bot → «💳 To'lov tizimi» orqali sozlang."
         )
         return False, "secret_not_set"
 
@@ -119,14 +132,28 @@ async def verify_webhook_signature(payload: dict) -> tuple[bool, str]:
         f'{payload.get("order_id")}:{payload.get("payment_id")}:'
         f'{payload.get("state")}:{payload.get("timestamp")}'
     )
-    expected = hmac.new(
-        secret.encode("utf-8"),
-        message.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
 
-    valid = hmac.compare_digest(expected, received)
-    return valid, ("ok" if valid else "mismatch")
+    for name, secret in candidates:
+        expected = hmac.new(
+            secret.encode("utf-8"),
+            message.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if hmac.compare_digest(expected, received):
+            if name == "api_secret":
+                # Foydali ma'lumot: demak alohida webhook secret kerak emas.
+                logger.info(
+                    "ℹ️ Webhook imzosi API_SECRET bilan tasdiqlandi — provayder "
+                    "webhookni api_secret bilan imzolaydi (alohida webhook "
+                    "secret kerak emas)."
+                )
+            return True, "ok"
+
+    logger.warning(
+        "❌ Webhook imzosi mos kelmadi (%d kalit sinaldi: %s)",
+        len(candidates), ", ".join(n for n, _ in candidates),
+    )
+    return False, "mismatch"
 
 
 # ─────────────────────────────────────────────────────────────
