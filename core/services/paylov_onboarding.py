@@ -4,10 +4,17 @@ WLCM partner onboarding klienti — `PROD_TOKEN` → `api_key` + `api_secret`.
 Do'kon egasiga WLCM odatda faqat **Token** (onboarding token) va **Partner ID**
 beradi. `api_key`/`api_secret` esa shu token yordamida GENERATSIYA qilinadi.
 
-Endpointlar (docs.wlcm.uz bo'yicha):
+Endpointlar (docs.wlcm.uz → Onboarding API):
   GET  {ONBOARDING_PATH}?token=<TOKEN>              → {"valid": true}
   POST {ONBOARDING_PATH}?token=<TOKEN>  body:{"name": "..."}
                                                      → {id, name, api_key, api_secret}
+
+GET tekshiruvlari (hujjat bo'yicha): token valid, `is_used=false`,
+`expires_at > now`, `uses_left > 0`, va `allowed_ip` bo'lsa IP mos kelishi.
+
+POST logikasi: token qulflanadi (`SELECT ... FOR UPDATE`), `uses_left` kamayadi,
+0 bo'lsa `is_used=true`; partner faolligi tekshiriladi; kalit yaratiladi
+(secret shifrlangan holda saqlanadi).
 
 MUHIM 1: Onboarding HMAC imzo TALAB QILMAYDI — autentifikatsiya faqat `token`
 query parametri orqali (bu bosqichda hali `api_secret` yo'q). Shu sabab bu modul
@@ -36,12 +43,17 @@ _TIMEOUT = httpx.Timeout(30.0)
 # Server qaysi aniq path'da onboarding berishini bilmasak — quyidagilarni
 # navbatma-navbat sinaymiz (404 bo'lsa keyingisiga o'tamiz). Birinchi navbatda
 # config'dagi (env orqali sozlanadigan) path tekshiriladi.
+# Hujjatda ikki xil ko'rsatilgan: "Onboarding API" sahifasida
+# `partners/onboarding/`, "Tavsiya etilgan integratsiya oqimi" sahifasida esa
+# `/onboarding/`. Boshqa endpointlar `/api/v1` prefiksi bilan ishlatilgani
+# (imzo va cURL namunalarida aniq ko'rsatilgan) uchun ikkalasini ham prefiks
+# bilan sinaymiz.
 _CANDIDATE_PATHS = [
     PAYLOV_ONBOARDING_PATH,
     "/api/v1/partners/onboarding/",
+    "/api/v1/onboarding/",
     "/api/v1/partners/onboarding",
     "/partners/onboarding/",
-    "/api/v1/onboarding/",
 ]
 
 
