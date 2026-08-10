@@ -490,7 +490,8 @@ def system_kb() -> InlineKeyboardMarkup:
 # ═════════════════════════════════════════════════════════════
 #  TO'LOV TIZIMI (WLCM: Payme / Click / Uzum / Paylov)
 # ═════════════════════════════════════════════════════════════
-def payments_kb(*, keys_ready: bool, has_token: bool, hook_ready: bool) -> InlineKeyboardMarkup:
+def payments_kb(*, keys_ready: bool, has_token: bool, hook_ready: bool,
+                has_db_keys: bool = False) -> InlineKeyboardMarkup:
     """To'lov tizimi bosh oynasi.
 
     Tugmalar holatga qarab o'zgaradi — do'kon egasi keyingi qadamni adashmasdan
@@ -510,6 +511,10 @@ def payments_kb(*, keys_ready: bool, has_token: bool, hook_ready: bool) -> Inlin
 
     hook_label = "🔐 Webhook secret" + (" ✅" if hook_ready else " ❗️")
     rows.append([_btn(hook_label, "pay:hook")])
+    rows.append([_btn("🏷 Partner ID", "pay:pid")])
+    # Bazadagi kalitlarni env uchun ko'rsatish (zaxira nusxa olish).
+    if has_db_keys:
+        rows.append([_btn("📤 Kalitlarni ko'rsatish (env uchun)", "pay:export")])
     rows.append([_btn("🔄 Yangilash", "pay:menu")])
     if keys_ready or has_token or hook_ready:
         rows.append([_btn("🗑 Kalitlarni tozalash", "pay:wipe")])

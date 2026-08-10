@@ -121,6 +121,24 @@ Shu sabab kalitlarni bergan xat egalariga yozib, ikki narsani so'rash kerak:
 ⚠️ Secret **`api_secret` dan boshqa qiymat** — hujjat uni alohida sozlama
 (`PAYLOV_WEBHOOK_SECRET`) sifatida ko'rsatadi. Taxmin qilmang, so'rang.
 
+### Kalitlarni env'ga zaxira nusxalash
+
+Kalitlar bazada (`payment_credentials`) saqlanadi va bu yetarli. Lekin
+**onboarding tokeni bir martalik** — agar baza qayta yaratilsa (Railway Postgres
+almashtirilsa yoki reset qilinsa), kalitlar yo'qoladi va yangi kalit olish uchun
+WLCM'dan **yangi token** so'rash kerak bo'ladi.
+
+Shu sabab **«📤 Kalitlarni ko'rsatish (env uchun)»** tugmasi bor: u bazadagi
+qiymatlarni Railway env formatida (`API_KEY=…`) chiqaradi. Nusxa olib
+Railway → Variables ga qo'shasiz va **xabarni o'chirasiz**.
+
+Env qiymati bazadan **ustun** turgani uchun ko'chirgandan keyin panel manbani
+`(env)` deb ko'rsatadi — o'z-o'zini tekshirish.
+
+> IntizomAi loyihasida faqat shu usul ishlatilgan: kalitlar chatda ko'rsatilib,
+> admin ularni qo'lda env'ga ko'chirib redeploy qilardi. Bizda ikkalasi ham
+> mumkin — bazaga saqlash (redeploy kerak emas) va env'ga nusxalash (zaxira).
+
 ### Partner ID
 
 Integratsiya uchun **kerak emas** — autentifikatsiya faqat `X-API-Key` va imzo
@@ -333,3 +351,33 @@ ko'rsatilgani uchun kod narxlarni **tiyinga** aylantirib yuboradi.
   buyurtmalarni avtomatik bekor qilish job'i qo'shilishi mumkin.
 - **Avtomatik refund** — WLCM refund endpointi ulangach.
 - **Mini App ichidan to'lash** — hozir to'lov faqat bot ichida amalga oshiriladi.
+
+
+## 10.12 IntizomAi bilan solishtirish
+
+Bu integratsiya IntizomAi loyihasidagi pattern asosida yozilgan. Farqlar
+(hammasi ataylab):
+
+| Jihat | IntizomAi | Gunesh |
+|---|---|---|
+| Nima to'lanadi | Obuna (tarif → kunlar) | **Buyurtma** (aniq summa `Order.grand_total` dan) |
+| Kalitlar qayerda | Faqat **env** | **env → baza** (env ustun); bot orqali onboarding |
+| Onboarding | `onboard.py` CLI + `/admin` → kalitlarni **chatda ko'rsatadi** | Bot ichida, kalitlar **avtomatik saqlanadi**; ko'rsatish — ixtiyoriy (zaxira uchun) |
+| Kalit olgandan keyin | Qo'lda env'ga ko'chirish + **redeploy** | Darhol ishlaydi (redeploy kerak emas) |
+| Webhook secret | Faqat env, botda kiritish imkoni **yo'q** | Bot orqali ham kiritiladi |
+| Sirlar ko'rsatilishi | To'liq ko'rsatiladi | Faqat maskalangan (`AK_gen…3456`); to'liq ko'rish alohida tugma orqali |
+| Webhook rad etilsa | **Hech kim xabardor bo'lmaydi** | **Adminlarga xabar** + tayyor `/tolov` buyrug'i |
+| Qo'lda tasdiqlash | `/admin` → «💳 To'lovni faollashtirish» | Admin bot → «💳 To'lovni tasdiqlash» yoki `/tolov` |
+
+### ⚠️ Muhim: webhook secret muammosi IntizomAi'da ham hal qilinmagan
+
+IntizomAi'da `PAYLOV_WEBHOOK_SECRET` faqat env'dan o'qiladi va uni olish yo'li
+kodda yo'q. Agar u sozlanmagan bo'lsa, u yerda ham webhook **rad etiladi** va
+obuna **avtomatik ochilmaydi** — admin har bir to'lovni qo'lda faollashtiradi.
+
+Bundan tashqari IntizomAi'da webhook rad etilganda **adminlarga xabar
+berilmaydi**, ya'ni mijoz to'lagan pul e'tibordan chetda qolishi mumkin. Bizda
+bu tuzatilgan (10.6 → «🟡 holatda pul yo'qolmaydi»).
+
+Xulosa: webhook secret'ni **faqat Paylov/WLCM jamoasidan olish** mumkin — bu
+kod bilan hal qiladigan masala emas.
