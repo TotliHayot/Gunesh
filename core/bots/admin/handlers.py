@@ -114,6 +114,7 @@ HELP_TEXT = (
     "/order 1042 — raqam bo'yicha topish\n"
     "/stats — statistika\n"
     "/tolov — onlayn to'lovni QO'LDA tasdiqlash\n"
+    "/chek 1029 — soliq chekini qayta yaratish\n"
     "/menu — asosiy menyu\n"
     "/cancel — joriy amalni bekor qilish\n\n"
     "<b>Ish tartibi</b>\n"
@@ -474,6 +475,56 @@ async def _activate_payment(message: Message, session: AsyncSession, ref: str):
         f"🏦 Usul: <b>{esc(payment_service.provider_label(payment.provider))}</b>\n"
         f"👤 Mijoz: <code>{order.user_id}</code>\n\n"
         "Mijozga xabar yuborildi.",
+        reply_markup=kb.main_menu(),
+    )
+
+
+@router.message(Command("chek"))
+async def cmd_fiscal_retry(message: Message, command: CommandObject, session: AsyncSession,
+                           state: FSMContext):
+    """Soliq chekini QAYTA yaratish — sozlamalar to'g'rilangandan keyin.
+
+    Chek yaratilmasa `fiscal_done` belgilanmaydi, shuning uchun MXIK yoki boshqa
+    sozlamani to'g'rilab, shu buyruq bilan qayta urinish mumkin.
+    """
+    await state.clear()
+    from core.services import payment_service
+
+    ref = (command.args or "").strip()
+    if not ref:
+        await message.answer(
+            "🧾 <b>Soliq chekini qayta yaratish</b>\n\n"
+            "Buyurtma raqami yoki to'lov identifikatorini qo'shib yuboring:\n"
+            "<code>/chek #1029</code>\n"
+            "<code>/chek 15909</code>\n\n"
+            "ℹ️ Sozlamalarni (MXIK, qadoq kodi, QQS) to'g'rilagandan keyin "
+            "ishlatiladi.",
+            reply_markup=kb.main_menu(),
+        )
+        return
+
+    payment = await payment_service.find_payment(session, ref)
+    if payment is None:
+        await message.answer(
+            "❌ Bunday to'lov topilmadi.", reply_markup=kb.main_menu()
+        )
+        return
+
+    order = await order_service.get_order(session, payment.order_id)
+    await message.answer("⏳ Chek yaratilmoqda…")
+    try:
+        ok, reason = await payment_service.retry_fiscalization(session, payment)
+    except Exception as e:
+        logger.exception("Chekni qayta yaratishda xato (%s): %s", ref, e)
+        await message.answer(
+            f"❌ Kutilmagan xato: {esc(str(e)[:300])}", reply_markup=kb.main_menu()
+        )
+        return
+
+    num = f"#{order.order_number}" if order else "—"
+    icon = "✅" if ok else "❌"
+    await message.answer(
+        f"{icon} <b>Soliq cheki</b> — buyurtma {num}\n\n{esc(reason)}",
         reply_markup=kb.main_menu(),
     )
 
