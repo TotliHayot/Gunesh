@@ -38,3 +38,13 @@ class Product(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    # ── Soliq cheki (OFD) uchun ──
+    # MXIK (IKPU) — soliq katalogidagi mahsulot kodi, 17 xonali. HAR BIR
+    # MAHSULOT UCHUN ALOHIDA bo'ladi (sut, tvorog, qaymoq — har xil kod), shu
+    # sabab u mahsulot kartochkasida saqlanadi. Bo'sh bo'lsa umumiy sozlama
+    # (PAYLOV_FISCAL_MXIK) zaxira sifatida ishlatiladi.
+    mxik: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Qadoq (package) kodi — har bir MXIK uchun ruxsat etilgan qiymatlar
+    # ro'yxatidan olinadi (dona, kg, litr...).
+    package_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
