@@ -249,6 +249,8 @@ def product_card_kb(product, page: int) -> InlineKeyboardMarkup:
         [_btn("💰 Narx", f"pe:price:{pid}:{page}"), _btn("🏷 Eski narx", f"pe:oldprice:{pid}:{page}")],
         [_btn("📦 Qoldiq", f"pe:stock:{pid}:{page}"), _btn("🖼 Rasm", f"pe:photo:{pid}:{page}")],
         [_btn("🗂 Kategoriya", f"pcatm:{pid}:{page}"), _btn("🔢 Tartib", f"pe:sort:{pid}:{page}")],
+        [_btn(("✅ " if (product.mxik or "").strip() else "🧾 ") + "Soliq kodlari (MXIK)",
+              f"pfx:{pid}:{page}")],
         [
             _btn("🔴 Nofaol qilish" if active else "🟢 Faollashtirish", f"ptog:{pid}:{page}"),
             _btn("🗑 O'chirish", f"pdel:{pid}:{page}"),
@@ -266,6 +268,17 @@ def product_translations_kb(product, page: int) -> InlineKeyboardMarkup:
         [_btn(f"{ok(product.name_en)} 🇬🇧 Nom (EN)", f"pe:name_en:{pid}:{page}")],
         [_btn(f"{ok(product.description_ru)} 🇷🇺 Tavsif (RU)", f"pe:desc_ru:{pid}:{page}")],
         [_btn(f"{ok(product.description_en)} 🇬🇧 Tavsif (EN)", f"pe:desc_en:{pid}:{page}")],
+        back_row(f"pv:{pid}:{page}", "⬅️ Kartaga"),
+    ])
+
+
+def product_fiscal_kb(product, page: int) -> InlineKeyboardMarkup:
+    """Mahsulotning soliq cheki (OFD) kodlari — MXIK va qadoq kodi."""
+    pid = product.id
+    ok = lambda v: "✅" if (v or "").strip() else "➖"  # noqa: E731
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_btn(f"{ok(product.mxik)} 🧾 MXIK (IKPU)", f"pe:mxik:{pid}:{page}")],
+        [_btn(f"{ok(product.package_code)} 📦 Qadoq kodi", f"pe:pkg:{pid}:{page}")],
         back_row(f"pv:{pid}:{page}", "⬅️ Kartaga"),
     ])
 

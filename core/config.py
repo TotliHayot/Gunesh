@@ -265,9 +265,23 @@ def _to_int(val, default: int = 0) -> int:
 PAYLOV_FISCAL_ENABLED = (
     os.getenv("PAYLOV_FISCAL_ENABLED", "false").strip().lower() in ("1", "true", "yes")
 )
-# IKPU/MXIK mahsulot kodi (sut mahsulotlari uchun soliq kodi).
+# IKPU/MXIK mahsulot kodi — UMUMIY ZAXIRA qiymat.
+# DIQQAT: MXIK har bir mahsulot uchun ALOHIDA bo'ladi (sut, tvorog, qaymoq —
+# har xil kod). Asosiy joyi — mahsulot kartochkasi (Super Admin → Katalog →
+# mahsulot → 🧾 Soliq kodlari). Bu env qiymati faqat mahsulotda kod
+# ko'rsatilmagan holatda ishlatiladi.
 PAYLOV_FISCAL_MXIK = (os.getenv("PAYLOV_FISCAL_MXIK", "") or "").strip()
 PAYLOV_FISCAL_PACKAGE_CODE = (os.getenv("PAYLOV_FISCAL_PACKAGE_CODE", "") or "").strip()
+
+# Yetkazib berish — bu XIZMAT, mahsulot emas, shuning uchun uning MXIK kodi
+# boshqa bo'ladi. Mahsulot kodini xizmatga qo'yish OFD tomonidan rad etilishi
+# mumkin. Bo'sh bo'lsa yetkazib berish chekka QO'SHILMAYDI (chek summasi
+# to'lovga teng bo'lmasligi sababli chek umuman yuborilmaydi — shuning uchun
+# yetkazib berish narxi bo'lsa bu kodni to'ldirish kerak).
+PAYLOV_FISCAL_DELIVERY_MXIK = (os.getenv("PAYLOV_FISCAL_DELIVERY_MXIK", "") or "").strip()
+PAYLOV_FISCAL_DELIVERY_PACKAGE_CODE = (
+    os.getenv("PAYLOV_FISCAL_DELIVERY_PACKAGE_CODE", "") or ""
+).strip()
 PAYLOV_FISCAL_VAT_PERCENT = _to_int(os.getenv("PAYLOV_FISCAL_VAT_PERCENT", "0"), 0)
 
 # Chekdagi `price` maydonining birligi: tiyin (default) yoki som.

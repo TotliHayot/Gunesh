@@ -69,6 +69,9 @@ PRODUCT_NEW_COLUMNS = [
     ("name_en", "VARCHAR(200)"),
     ("description_ru", "TEXT"),
     ("description_en", "TEXT"),
+    # Soliq cheki (OFD) uchun har bir mahsulotning o'z kodlari.
+    ("mxik", "VARCHAR(20)"),
+    ("package_code", "VARCHAR(32)"),
 ]
 
 CATEGORY_NEW_COLUMNS = [

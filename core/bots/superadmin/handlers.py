@@ -516,6 +516,22 @@ _PRODUCT_FIELD_PROMPTS = {
     "stock": ("📦 Yangi <b>qoldiq</b>ni raqamda yuboring:", "cancel"),
     "sort": ("🔢 <b>Tartib raqami</b>ni yuboring (kichik raqam — yuqorida turadi):", "cancel"),
     "photo": ("🖼 Yangi <b>rasm</b>ni yuboring:", "clear"),
+    "mxik": (
+        "🧾 <b>MXIK (IKPU)</b> kodini yuboring — soliq katalogidagi shu "
+        "mahsulotning kodi.\n\n"
+        "• Odatda <b>17 xonali</b> raqam\n"
+        "• Har bir mahsulot uchun <b>alohida</b> (sut, tvorog, qaymoq — har xil)\n"
+        "• Kodni buxgalter yoki <code>soliq.uz</code> katalogidan olasiz\n\n"
+        "Soliq cheki shu kod bilan yuboriladi — noto'g'ri kod chekni rad etadi.",
+        "clear",
+    ),
+    "pkg": (
+        "📦 <b>Qadoq (package) kodi</b>ni yuboring.\n\n"
+        "Bu kod <b>MXIK'ga bog'liq</b> — har bir MXIK uchun ruxsat etilgan "
+        "qadoq kodlari ro'yxati bo'ladi (dona, kg, litr...).\n\n"
+        "Bilmasangiz «🗑 Tozalash» bilan bo'sh qoldiring — u ixtiyoriy maydon.",
+        "clear",
+    ),
 }
 
 
@@ -613,6 +629,26 @@ async def product_edit_value(message: Message, session: AsyncSession, state: FSM
         )
         return
 
+    # Soliq cheki kodlari. MXIK odatda 17 xonali raqam — faqat ogohlantiramiz,
+    # bloklamaymiz (turli toifalarda uzunlik farq qilishi mumkin).
+    if field in ("mxik", "pkg"):
+        column = "mxik" if field == "mxik" else "package_code"
+        limit = 20 if field == "mxik" else 32
+        value = "" if cleared else raw[:limit]
+        if field == "mxik" and value:
+            digits = "".join(ch for ch in value if ch.isdigit())
+            if not digits:
+                await message.answer("❗️ MXIK raqamlardan iborat bo'lishi kerak. Qayta yuboring:")
+                return
+            value = digits
+        await catalog_service.update_product(session, pid, **{column: value})
+        label = "🧾 MXIK" if field == "mxik" else "📦 Qadoq kodi"
+        note = f"{label} " + ("o'chirildi." if cleared else f"saqlandi: {value}")
+        if field == "mxik" and value and len(value) != 17:
+            note += f"\n⚠️ Diqqat: kod {len(value)} xonali (odatda 17 xonali bo'ladi)."
+        await _finish_product_edit(message, session, state, note)
+        return
+
     if field in ("price", "stock", "sort", "oldprice"):
         if field == "oldprice" and cleared:
             await catalog_service.update_product(session, pid, old_price=None)
@@ -669,6 +705,52 @@ async def product_translations(callback: CallbackQuery, session: AsyncSession, s
         "Tarjima kiritilmasa, Mini App o'zbekcha nomni ko'rsatadi."
     )
     await _edit(callback, text, kb.product_translations_kb(product, int(page)))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("pfx:"))
+async def product_fiscal(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    """Mahsulotning soliq cheki (OFD) kodlari."""
+    await state.clear()
+    _, pid, page = callback.data.split(":")
+    product = await catalog_service.get_product(session, int(pid))
+    if not product:
+        await callback.answer("Mahsulot topilmadi.", show_alert=True)
+        return
+
+    from core.config import (
+        PAYLOV_FISCAL_ENABLED, PAYLOV_FISCAL_MXIK, PAYLOV_FISCAL_VAT_PERCENT,
+    )
+
+    mxik = (product.mxik or "").strip()
+    pkg = (product.package_code or "").strip()
+    fallback = " <i>(umumiy zaxira ishlatiladi)</i>" if (not mxik and PAYLOV_FISCAL_MXIK) else ""
+
+    lines = [
+        f"🧾 <b>Soliq kodlari</b> — {esc(product.name)}",
+        "",
+        f"🧾 MXIK: <code>{esc(mxik) or '—'}</code>{fallback}",
+        f"📦 Qadoq kodi: <code>{esc(pkg) or '—'}</code>",
+        "",
+        "MXIK (IKPU) — soliq katalogidagi mahsulot kodi. <b>Har bir mahsulot "
+        "uchun alohida</b> bo'ladi: sut, tvorog, qaymoq — har xil kod.",
+    ]
+    if not PAYLOV_FISCAL_ENABLED:
+        lines += [
+            "",
+            "ℹ️ Soliq cheki hozir <b>o'chirilgan</b> "
+            "(<code>PAYLOV_FISCAL_ENABLED=false</code>) — kodlar saqlanadi, "
+            "lekin chek yuborilmaydi.",
+        ]
+    else:
+        lines += ["", f"✅ Soliq cheki yoqilgan · QQS: <b>{PAYLOV_FISCAL_VAT_PERCENT}%</b>"]
+        if not mxik and not PAYLOV_FISCAL_MXIK:
+            lines += [
+                "",
+                "⚠️ <b>Kod yo'q</b> — bu mahsulot sotilsa chek yaratilmaydi "
+                "(adminlarga xabar boradi).",
+            ]
+    await _edit(callback, "\n".join(lines), kb.product_fiscal_kb(product, int(page)))
     await callback.answer()
 
 

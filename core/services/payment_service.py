@@ -35,6 +35,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.config import (
     PAYLOV_FISCAL_ENABLED,
     PAYLOV_FISCAL_MXIK,
+    PAYLOV_FISCAL_DELIVERY_MXIK,
+    PAYLOV_FISCAL_DELIVERY_PACKAGE_CODE,
     PAYLOV_FISCAL_PACKAGE_CODE,
     PAYLOV_FISCAL_PRICE_UNIT,
     PAYLOV_FISCAL_VAT_PERCENT,
@@ -636,35 +638,66 @@ async def _cancel_other_pending(session: AsyncSession, paid: Payment) -> None:
     await session.commit()
 
 
-def build_fiscal_items(order: Order) -> list[dict]:
-    """Buyurtmadan soliq cheki (OFD) uchun `items` ro'yxatini yasaydi.
-
-    NARX BIRLIGI: hujjat `price` ni «birlik narxi» (decimal) deb belgilaydi,
-    lekin BIRLIGINI aniq aytmaydi. Namunada `price: 120000` aynan checkout
-    `amount: 120000` (tiyin) bilan bir xil ko'rsatilgan — demak TIYIN.
-    Mantiq ham shuni tasdiqlaydi: chek summasi to'lov summasiga teng bo'lishi
-    kerak, aks holda OFD 100 barobar farqni rad etadi.
-
-    Agar provayder so'mni talab qilsa — `PAYLOV_FISCAL_PRICE_UNIT=som` qo'yiladi
-    (kodni o'zgartirmasdan).
+async def build_fiscal_items(
+    session: AsyncSession, order: Order
+) -> tuple[list[dict], list[str]]:
     """
+    Buyurtmadan soliq cheki (OFD) uchun `items` ro'yxatini yasaydi.
+
+    Qaytaradi: (items, mxik_yetishmaydigan_nomlar).
+
+    MXIK HAR BIR MAHSULOT UCHUN ALOHIDA. Do'kon turli mahsulot sotadi (sut,
+    tvorog, qaymoq...) va ularning soliq kodlari boshqa-boshqa. Shu sabab kod
+    tartib bo'yicha izlanadi:
+        1. mahsulot kartochkasidagi `mxik` (asosiy joy);
+        2. umumiy zaxira `PAYLOV_FISCAL_MXIK` (env).
+    Yetkazib berish — XIZMAT, uning kodi alohida
+    (`PAYLOV_FISCAL_DELIVERY_MXIK`); mahsulot kodini xizmatga qo'yish OFD
+    tomonidan rad etilishi mumkin.
+
+    NARX BIRLIGI: hujjat `price` ni «birlik narxi» deb belgilaydi, lekin
+    birligini aytmaydi. Namunada `price: 120000` aynan checkout `amount: 120000`
+    (tiyin) bilan bir xil, va chek summasi to'lov summasiga teng bo'lishi kerak
+    — shu sabab default TIYIN (`PAYLOV_FISCAL_PRICE_UNIT` bilan o'zgartiriladi).
+    """
+    from core.models.product import Product
+
     mult = 1 if PAYLOV_FISCAL_PRICE_UNIT == "som" else 100
 
+    # Mahsulot kodlarini bir so'rovda olamiz (o'chirilgan mahsulot ham topiladi).
+    product_ids = [it.product_id for it in order.items if it.product_id]
+    codes: dict[int, tuple[str, str]] = {}
+    if product_ids:
+        rows = (await session.execute(
+            select(Product.id, Product.mxik, Product.package_code)
+            .where(Product.id.in_(product_ids))
+        )).all()
+        codes = {r[0]: ((r[1] or "").strip(), (r[2] or "").strip()) for r in rows}
+
     items: list[dict] = []
+    missing: list[str] = []
+
     for it in order.items:
+        mxik, pkg = codes.get(it.product_id or 0, ("", ""))
+        mxik = mxik or PAYLOV_FISCAL_MXIK
+        pkg = pkg or PAYLOV_FISCAL_PACKAGE_CODE
+
         item = {
             "title": it.name_snapshot,
             "price": int(it.price_snapshot) * mult,
             "count": int(it.qty),
             "vat_percent": PAYLOV_FISCAL_VAT_PERCENT,
         }
-        if PAYLOV_FISCAL_MXIK:
-            item["code"] = PAYLOV_FISCAL_MXIK  # hujjatda: mxik sifatida saqlanadi
-        if PAYLOV_FISCAL_PACKAGE_CODE:
-            item["package_code"] = PAYLOV_FISCAL_PACKAGE_CODE
+        if mxik:
+            item["code"] = mxik            # hujjatda: mxik sifatida saqlanadi
+        else:
+            missing.append(it.name_snapshot)
+        if pkg:
+            item["package_code"] = pkg
         items.append(item)
 
-    # Yetkazib berish ham chekka kiradi (mijoz uni to'lagan).
+    # Yetkazib berish ham chekka kiradi (mijoz uni to'lagan) — lekin XIZMAT
+    # kodi bilan. Kod bo'lmasa chekni buzmaslik uchun aniq xabar beramiz.
     if order.delivery_fee:
         delivery = {
             "title": "Yetkazib berish",
@@ -672,10 +705,15 @@ def build_fiscal_items(order: Order) -> list[dict]:
             "count": 1,
             "vat_percent": PAYLOV_FISCAL_VAT_PERCENT,
         }
-        if PAYLOV_FISCAL_MXIK:
-            delivery["code"] = PAYLOV_FISCAL_MXIK
+        if PAYLOV_FISCAL_DELIVERY_MXIK:
+            delivery["code"] = PAYLOV_FISCAL_DELIVERY_MXIK
+            if PAYLOV_FISCAL_DELIVERY_PACKAGE_CODE:
+                delivery["package_code"] = PAYLOV_FISCAL_DELIVERY_PACKAGE_CODE
+        else:
+            missing.append("Yetkazib berish (xizmat)")
         items.append(delivery)
-    return items
+
+    return items, missing
 
 
 def fiscal_items_total_tiyin(items: list[dict]) -> int:
@@ -706,8 +744,30 @@ async def _try_fiscalization(session: AsyncSession, payment: Payment, order: Ord
         )
         return
 
-    items = build_fiscal_items(order)
+    items, missing = await build_fiscal_items(session, order)
     if not items:
+        return
+
+    # ── MXIK tekshiruvi ──
+    # MXIK'siz chek OFD tomonidan rad etiladi (400). Noto'g'ri urinish o'rniga
+    # ADMINGA aniq aytamiz: qaysi mahsulotga kod kerak va uni qayerda kiritish.
+    if missing:
+        names = ", ".join(missing[:8])
+        logger.error(
+            "🧾 Soliq cheki yuborilmadi — MXIK yo'q: %s (buyurtma #%s)",
+            names, order.order_number,
+        )
+        await _notify_admins(
+            "🧾 <b>Soliq cheki yaratilmadi — MXIK yo'q</b>\n\n"
+            f"🧾 Buyurtma: <b>#{order.order_number}</b>\n"
+            f"❗️ Kod ko'rsatilmagan: <b>{esc_text(names)}</b>\n\n"
+            "MXIK (IKPU) <b>har bir mahsulot uchun alohida</b> bo'ladi. Uni "
+            "kiriting:\n"
+            "Super Admin → 📦 Katalog → mahsulot → <b>🧾 Soliq kodlari</b>\n\n"
+            "Yetkazib berish uchun esa <code>PAYLOV_FISCAL_DELIVERY_MXIK</code> "
+            "env'ini to'ldiring (bu xizmat, mahsulot kodi mos kelmaydi).\n\n"
+            f"Keyin qayta urinib ko'ring: <code>/chek #{order.order_number}</code>"
+        )
         return
 
     # ── Summa tekshiruvi ──
