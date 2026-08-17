@@ -277,6 +277,18 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "ru": "ℹ️ Онлайн-оплата пока недоступна. Вы можете выбрать оплату наличными при доставке.",
         "en": "ℹ️ Online payment is currently unavailable. You can choose cash on delivery.",
     },
+    # «To'lovga tayyor» xabari o'chirib bo'lmasa qo'yiladigan qisqa matnlar
+    # (yakuniy natija alohida yangi xabarda keladi — takrorlanmasligi uchun qisqa).
+    "payment_closed_paid": {
+        "uz": "💳 To'lov yakunlandi ✅",
+        "ru": "💳 Оплата завершена ✅",
+        "en": "💳 Payment completed ✅",
+    },
+    "payment_closed_canceled": {
+        "uz": "💳 To'lov bekor qilindi",
+        "ru": "💳 Оплата отменена",
+        "en": "💳 Payment canceled",
+    },
     "no_payment_methods": {
         "uz": "To'lov usullari sozlanmagan. Iltimos, operator bilan bog'laning.",
         "ru": "Способы оплаты не настроены. Пожалуйста, свяжитесь с оператором.",

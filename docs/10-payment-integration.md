@@ -393,8 +393,23 @@ va `WLCM_ONBOARDING_PATH` env orqali ham o'zgartirish mumkin.
 saqlanadi), `package_code`, `discount`, `pinfl`, `tin` (ixtiyoriy).
 Javobda `fiscal_number` va `qr_code_url` bo'ladi — kod ularni mijozga yuboradi.
 
-Hujjat namunasida `price` qiymati checkout `amount` bilan bir xil (tiyin)
-ko'rsatilgani uchun kod narxlarni **tiyinga** aylantirib yuboradi.
+**Narx birligi.** Hujjat `price` ni «birlik narxi» (decimal) deb belgilaydi, lekin
+BIRLIGINI aytmaydi. Namunada `price: 120000` aynan checkout `amount: 120000`
+(tiyin) bilan bir xil — demak **tiyin**. Mantiq ham shuni tasdiqlaydi: chek
+summasi to'lov summasiga teng bo'lishi kerak, aks holda OFD 100 barobar farqni
+rad etadi. Shu sabab default `tiyin`; provayder so'mni talab qilsa
+`PAYLOV_FISCAL_PRICE_UNIT=som`.
+
+**O'z-o'zini tekshirish.** Kod yuborishdan OLDIN chek summasini to'lov summasiga
+solishtiradi. Teng bo'lmasa — **noto'g'ri soliq ma'lumotini yubormaydi**, balki
+adminlarga sabab va yechim bilan xabar beradi (bu huquqiy masala).
+
+**Xatolar jim o'tmaydi.** Chek yaratilmasa adminlarga `payment_id` va xato matni
+bilan xabar boradi (to'lov muvaffaqiyatli ekani ta'kidlanadi). `fiscal_done`
+belgilanmaydi — ya'ni keyinroq qayta urinish mumkin.
+
+Chek ikki marta yaratilmaydi (`fiscal_done` bayrog'i), va `payment_id` hujjatga
+mos ravishda **int** ga o'tkaziladi.
 
 ### Ataylab amalga oshirilmagan
 
