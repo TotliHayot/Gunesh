@@ -36,6 +36,7 @@ from core.config import (
     PAYLOV_FISCAL_ENABLED,
     PAYLOV_FISCAL_MXIK,
     PAYLOV_FISCAL_PACKAGE_CODE,
+    PAYLOV_FISCAL_PRICE_UNIT,
     PAYLOV_FISCAL_VAT_PERCENT,
     PAYLOV_PROVIDER,
     PAYLOV_PROVIDERS,
@@ -283,10 +284,15 @@ async def _notify_admins(text: str) -> None:
         logger.warning("Adminlarga to'lov xabari yuborilmadi: %s", e)
 
 
-async def _finalize_pay_message(payment: Payment, text: str) -> None:
-    """«To'lovga tayyor» xabarini yakuniy matnga almashtiradi (tugmalarni olib).
+async def _close_pay_message(payment: Payment, fallback_text: str) -> None:
+    """«To'lovga tayyor» xabarini yopadi — O'CHIRADI.
 
-    Xato bo'lsa jim o'tadi — xabar eski bo'lishi yoki o'chirilgan bo'lishi mumkin.
+    NEGA O'CHIRAMIZ, tahrirlamaymiz: yakuniy natija baribir YANGI xabar sifatida
+    yuboriladi (mijozga bildirishnoma kelishi uchun). Agar eski xabarni ham
+    o'sha matnga tahrirlasak, mijoz bir xil matnni IKKI marta ko'radi.
+
+    O'chirib bo'lmasa (masalan xabar 48 soatdan oshgan) — QISQA neytral matnga
+    almashtiramiz, tugmalarni olib. Bu ham takrorlanishga olib kelmaydi.
     """
     if not payment.pay_message_id or not payment.pay_chat_id:
         return
@@ -295,17 +301,24 @@ async def _finalize_pay_message(payment: Payment, text: str) -> None:
     if bot is None:
         return
     try:
+        await bot.delete_message(
+            chat_id=payment.pay_chat_id, message_id=payment.pay_message_id,
+        )
+        return
+    except Exception as e:
+        logger.info(
+            "To'lov xabarini o'chirib bo'lmadi (%s/%s): %s — tahrirlashga o'tamiz",
+            payment.pay_chat_id, payment.pay_message_id, e,
+        )
+    try:
         await bot.edit_message_text(
             chat_id=payment.pay_chat_id,
             message_id=payment.pay_message_id,
-            text=text,
+            text=fallback_text,
             reply_markup=None,
         )
     except Exception as e:
-        logger.info(
-            "To'lov xabarini tahrirlab bo'lmadi (%s/%s): %s",
-            payment.pay_chat_id, payment.pay_message_id, e,
-        )
+        logger.info("To'lov xabarini tahrirlab ham bo'lmadi: %s", e)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -489,7 +502,7 @@ async def _on_payment_canceled(session: AsyncSession, payment: Payment) -> None:
         return
     lang = await user_service.get_language(session, payment.user_id)
     text = t("payment_canceled", lang, number=order.order_number)
-    await _finalize_pay_message(payment, text)
+    await _close_pay_message(payment, t("payment_closed_canceled", lang))
     try:
         await notify_service.notify_customer(payment.user_id, text, pay_start(order.id, lang))
     except Exception as e:
@@ -578,7 +591,9 @@ async def confirm_payment(
         provider=label,
         number=order.order_number,
     )
-    await _finalize_pay_message(payment, success_text)
+    # Eski «To'lovga tayyor» xabari o'chiriladi, natija YANGI xabarda keladi —
+    # shunda mijoz bildirishnoma oladi va matn takrorlanmaydi.
+    await _close_pay_message(payment, t("payment_closed_paid", lang))
     await _notify_customer(payment.user_id, success_text)
 
     # ── ENDI buyurtma adminlarga to'liq karta sifatida yuboriladi ──
@@ -614,54 +629,140 @@ async def _cancel_other_pending(session: AsyncSession, paid: Payment) -> None:
     await session.commit()
 
 
+def build_fiscal_items(order: Order) -> list[dict]:
+    """Buyurtmadan soliq cheki (OFD) uchun `items` ro'yxatini yasaydi.
+
+    NARX BIRLIGI: hujjat `price` ni «birlik narxi» (decimal) deb belgilaydi,
+    lekin BIRLIGINI aniq aytmaydi. Namunada `price: 120000` aynan checkout
+    `amount: 120000` (tiyin) bilan bir xil ko'rsatilgan — demak TIYIN.
+    Mantiq ham shuni tasdiqlaydi: chek summasi to'lov summasiga teng bo'lishi
+    kerak, aks holda OFD 100 barobar farqni rad etadi.
+
+    Agar provayder so'mni talab qilsa — `PAYLOV_FISCAL_PRICE_UNIT=som` qo'yiladi
+    (kodni o'zgartirmasdan).
+    """
+    mult = 1 if PAYLOV_FISCAL_PRICE_UNIT == "som" else 100
+
+    items: list[dict] = []
+    for it in order.items:
+        item = {
+            "title": it.name_snapshot,
+            "price": int(it.price_snapshot) * mult,
+            "count": int(it.qty),
+            "vat_percent": PAYLOV_FISCAL_VAT_PERCENT,
+        }
+        if PAYLOV_FISCAL_MXIK:
+            item["code"] = PAYLOV_FISCAL_MXIK  # hujjatda: mxik sifatida saqlanadi
+        if PAYLOV_FISCAL_PACKAGE_CODE:
+            item["package_code"] = PAYLOV_FISCAL_PACKAGE_CODE
+        items.append(item)
+
+    # Yetkazib berish ham chekka kiradi (mijoz uni to'lagan).
+    if order.delivery_fee:
+        delivery = {
+            "title": "Yetkazib berish",
+            "price": int(order.delivery_fee) * mult,
+            "count": 1,
+            "vat_percent": PAYLOV_FISCAL_VAT_PERCENT,
+        }
+        if PAYLOV_FISCAL_MXIK:
+            delivery["code"] = PAYLOV_FISCAL_MXIK
+        items.append(delivery)
+    return items
+
+
+def fiscal_items_total_tiyin(items: list[dict]) -> int:
+    """`items` bo'yicha umumiy summa — TIYINDA (tekshirish uchun)."""
+    mult = 100 if PAYLOV_FISCAL_PRICE_UNIT == "som" else 1
+    return sum(int(i["price"]) * int(i["count"]) * mult for i in items)
+
+
 async def _try_fiscalization(session: AsyncSession, payment: Payment, order: Order) -> None:
-    """Soliq chekini yaratadi (ixtiyoriy; xato bo'lsa jim o'tadi)."""
+    """
+    Soliq chekini (OFD) yaratadi va mijozga QR havolasini yuboradi.
+
+    Ixtiyoriy: `PAYLOV_FISCAL_ENABLED=false` bo'lsa umuman ishlamaydi.
+    Idempotent: `payment.fiscal_done` bir marta bajarilishini kafolatlaydi.
+
+    XAVFSIZLIK (soliq ma'lumoti): yuborishdan OLDIN chek summasi to'lov
+    summasiga tengligi tekshiriladi. Teng bo'lmasa — NOTO'G'RI soliq ma'lumotini
+    yubormaymiz, balki adminlarni xabardor qilamiz (bu huquqiy masala).
+    """
     if not PAYLOV_FISCAL_ENABLED:
         return
-    if payment.fiscal_done or not payment.payment_id:
+    if payment.fiscal_done:
         return
+    if not payment.payment_id:
+        logger.warning(
+            "Soliq cheki: payment_id yo'q (payment=%s) — chek yaratilmadi",
+            payment.external_id,
+        )
+        return
+
+    items = build_fiscal_items(order)
+    if not items:
+        return
+
+    # ── Summa tekshiruvi ──
+    total = fiscal_items_total_tiyin(items)
+    if total != int(payment.amount):
+        logger.error(
+            "🧾 Soliq cheki YUBORILMADI — summa mos kelmadi: chek=%s tiyin, "
+            "to'lov=%s tiyin (birlik=%s). Buyurtma #%s",
+            total, payment.amount, PAYLOV_FISCAL_PRICE_UNIT, order.order_number,
+        )
+        await _notify_admins(
+            "🧾 <b>Soliq cheki yaratilmadi</b>\n\n"
+            f"🧾 Buyurtma: <b>#{order.order_number}</b>\n"
+            f"❗️ Chek summasi to'lov summasiga teng emas:\n"
+            f"• chek: <b>{total // 100:,}</b> so'm\n"
+            f"• to'lov: <b>{int(payment.amount) // 100:,}</b> so'm\n\n"
+            "Noto'g'ri soliq ma'lumotini yubormadik. Agar provayder narxni "
+            "boshqa birlikda kutayotgan bo'lsa, <code>PAYLOV_FISCAL_PRICE_UNIT</code> "
+            "sozlamasini o'zgartirish kerak (tiyin/som).".replace(",", " ")
+        )
+        return
+
+    # Hujjatda `payment_id` int sifatida ko'rsatilgan, bizda esa webhookdan matn
+    # ko'rinishida keladi — raqam bo'lsa int'ga o'tkazamiz (422 xatosining oldini
+    # oladi). Konversiya shu yerda: biznes-mantiq qismi va sinovdan o'tadi.
+    fiscal_payment_id: object = payment.payment_id
+    if isinstance(fiscal_payment_id, str) and fiscal_payment_id.strip().isdigit():
+        fiscal_payment_id = int(fiscal_payment_id.strip())
+
     try:
-        # Narx TIYINDA yuboriladi — hujjatdagi namunada `price: 120000` aynan
-        # checkout `amount: 120000` (tiyin) bilan bir xil ko'rsatilgan.
-        # Bizda narxlar so'mda saqlanadi, shuning uchun 100 ga ko'paytiramiz.
-        items: list[dict] = []
-        for it in order.items:
-            item = {
-                "title": it.name_snapshot,
-                "price": int(it.price_snapshot) * 100,
-                "count": int(it.qty),
-                "vat_percent": PAYLOV_FISCAL_VAT_PERCENT,
-            }
-            if PAYLOV_FISCAL_MXIK:
-                item["code"] = PAYLOV_FISCAL_MXIK  # mxik sifatida saqlanadi
-            if PAYLOV_FISCAL_PACKAGE_CODE:
-                item["package_code"] = PAYLOV_FISCAL_PACKAGE_CODE
-            items.append(item)
-        if order.delivery_fee:
-            items.append({
-                "title": "Yetkazib berish",
-                "price": int(order.delivery_fee) * 100,
-                "count": 1,
-                "vat_percent": PAYLOV_FISCAL_VAT_PERCENT,
-            })
-        if not items:
-            return
-
-        result = await paylov.register_fiscalization(payment.payment_id, items)
-        payment.fiscal_done = True
-        await session.commit()
-
-        qr = result.get("qr_code_url")
-        fiscal_number = result.get("fiscal_number")
-        lines = ["🧾 <b>Soliq cheki tayyor</b>"]
-        if fiscal_number:
-            lines.append(f"№ <code>{fiscal_number}</code>")
-        if qr:
-            lines.append(f'<a href="{qr}">Chekni ko\'rish (QR)</a>')
-        if len(lines) > 1:
-            await _notify_customer(payment.user_id, "\n".join(lines))
+        result = await paylov.register_fiscalization(fiscal_payment_id, items)
     except Exception as e:
-        logger.warning("Fiscalization xato payment=%s: %s", payment.external_id, e)
+        logger.error(
+            "🧾 Soliq cheki xatosi payment=%s: %s", payment.external_id, e
+        )
+        # Chek — huquqiy hujjat, shuning uchun jim o'tmaymiz: admin bilishi kerak.
+        await _notify_admins(
+            "🧾 <b>Soliq chekini yaratib bo'lmadi</b>\n\n"
+            f"🧾 Buyurtma: <b>#{order.order_number}</b>\n"
+            f"🧾 payment_id: <code>{payment.payment_id}</code>\n"
+            f"❗️ Xato: <code>{str(e)[:200]}</code>\n\n"
+            "To'lov muvaffaqiyatli — faqat chek yaratilmadi. Kerak bo'lsa "
+            "provayder kabinetidan qo'lda chek chiqarish mumkin."
+        )
+        return
+
+    payment.fiscal_done = True
+    await session.commit()
+
+    qr = result.get("qr_code_url")
+    fiscal_number = result.get("fiscal_number")
+    logger.info(
+        "🧾 Soliq cheki yaratildi: buyurtma=#%s №=%s", order.order_number, fiscal_number,
+    )
+
+    lines = ["🧾 <b>Soliq cheki tayyor</b>"]
+    if fiscal_number:
+        lines.append(f"№ <code>{fiscal_number}</code>")
+    if qr:
+        lines.append(f'<a href="{qr}">Chekni ko\'rish (QR)</a>')
+    if len(lines) > 1:
+        await _notify_customer(payment.user_id, "\n".join(lines))
 
 
 # ─────────────────────────────────────────────────────────────

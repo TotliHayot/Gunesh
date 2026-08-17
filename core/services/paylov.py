@@ -190,6 +190,20 @@ async def create_checkout(external_id: str, amount_tiyin: int,
 
 
 async def register_fiscalization(payment_id, items: list[dict]) -> dict:
-    """Soliq cheki (fiscal receipt) yaratadi. items — [{title, price, count, vat_percent}]."""
-    payload = {"payment_id": payment_id, "items": items}
+    """
+    Soliq cheki (fiscal receipt) yaratadi.
+
+    items elementi (hujjat bo'yicha): title, price, count — majburiy;
+    discount, voucher, package_code, code (mxik sifatida saqlanadi), labels,
+    pinfl, tin — ixtiyoriy.
+
+    Javob: {message, fiscal_id, fiscal_number, fiscal_sign, qr_code_url, ...}
+    """
+    # Hujjatda `payment_id` int sifatida ko'rsatilgan, bizda esa webhookdan
+    # matn ko'rinishida keladi — raqam bo'lsa int'ga o'tkazamiz (validatsiya
+    # xatosining oldini oladi).
+    pid = payment_id
+    if isinstance(pid, str) and pid.strip().isdigit():
+        pid = int(pid.strip())
+    payload = {"payment_id": pid, "items": items}
     return await _request("POST", f"{API_PREFIX}/fiscalization/register", payload)

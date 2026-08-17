@@ -270,6 +270,17 @@ PAYLOV_FISCAL_MXIK = (os.getenv("PAYLOV_FISCAL_MXIK", "") or "").strip()
 PAYLOV_FISCAL_PACKAGE_CODE = (os.getenv("PAYLOV_FISCAL_PACKAGE_CODE", "") or "").strip()
 PAYLOV_FISCAL_VAT_PERCENT = _to_int(os.getenv("PAYLOV_FISCAL_VAT_PERCENT", "0"), 0)
 
+# Chekdagi `price` maydonining birligi: tiyin (default) yoki som.
+# Hujjat birlikni aniq aytmaydi, lekin namunada `price` checkout `amount`
+# (tiyin) bilan bir xil ko'rsatilgan va chek summasi to'lov summasiga TENG
+# bo'lishi kerak — shu sabab default TIYIN. Provayder so'mni talab qilsa
+# `PAYLOV_FISCAL_PRICE_UNIT=som` qo'yiladi (kodni o'zgartirmasdan).
+PAYLOV_FISCAL_PRICE_UNIT = (
+    os.getenv("PAYLOV_FISCAL_PRICE_UNIT", "tiyin").strip().lower()
+)
+if PAYLOV_FISCAL_PRICE_UNIT not in ("tiyin", "som"):
+    PAYLOV_FISCAL_PRICE_UNIT = "tiyin"
+
 
 # ── Webhook manzili (WLCM shu manzilga to'lov natijasini yuboradi) ──
 PAYLOV_WEBHOOK_PATH = "/webhook/paylov"
