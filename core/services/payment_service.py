@@ -71,6 +71,31 @@ PROVIDER_LABELS = {
 # (external_id -> oxirgi xabar vaqti). Jarayon xotirasida saqlanadi.
 _unverified_notified: dict[str, float] = {}
 
+# ── Webhook faolligi jurnali ────────────────────────────────
+# Provayder webhookni ulaganini va u yetib kelayotganini KO'RISH uchun.
+# Sozlash paytida eng kerakli ma'lumot: "webhook umuman kelyaptimi yoki
+# faqat imzo mos kelmayaptimi?" — bularning yechimi butunlay boshqa.
+# Xotirada, cheklangan uzunlikda (bazaga yozish shart emas — bu diagnostika).
+_WEBHOOK_LOG_MAX = 10
+_webhook_log: list[dict] = []
+
+
+def record_webhook(external_id: str, state, result: str) -> None:
+    """Webhook urinishini jurnalga yozadi (eng oxirgi N ta saqlanadi)."""
+    _webhook_log.append({
+        "at": datetime.utcnow(),
+        "external_id": (str(external_id or "—"))[:40],
+        "state": str(state) if state is not None else "—",
+        "result": result,
+    })
+    if len(_webhook_log) > _WEBHOOK_LOG_MAX:
+        del _webhook_log[: len(_webhook_log) - _WEBHOOK_LOG_MAX]
+
+
+def webhook_log() -> list[dict]:
+    """Oxirgi webhook urinishlari (eng yangisi birinchi)."""
+    return list(reversed(_webhook_log))
+
 
 def provider_label(code: str | None) -> str:
     code = (code or "").strip().lower()

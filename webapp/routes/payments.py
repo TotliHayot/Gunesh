@@ -33,6 +33,9 @@ async def paylov_webhook_verify(request: Request):
     """
     client = request.client.host if request.client else "?"
     logger.info("🔎 To'lov webhook GET tekshiruvi: ip=%s", client)
+    # Provayder manzilni tekshirganini panelda ko'rish uchun.
+    from core.services.payment_service import record_webhook
+    record_webhook("—", "—", "GET tekshiruvi")
     return {
         "ok": True,
         "service": "paylov-webhook",
@@ -54,9 +57,14 @@ async def paylov_webhook(request: Request):
         payload.get("payment_id"), payload.get("amount"),
     )
 
-    from core.services.payment_service import process_webhook, verify_webhook_signature
+    from core.services.payment_service import (
+        process_webhook, record_webhook, verify_webhook_signature,
+    )
 
     valid, reason = await verify_webhook_signature(payload or {})
+    # Sozlash paytida ko'rish uchun: webhook yetib keldimi va natija qanday.
+    record_webhook(payload.get("external_id"), payload.get("state"), reason)
+
     if not valid:
         # Imzo noto'g'ri yoki secret sozlanmagan — soxta/buzilgan so'rov.
         # Buyurtma TO'LANGAN deb BELGILANMAYDI.
@@ -79,10 +87,26 @@ async def paylov_webhook(request: Request):
                     "detail": "Webhook secret sozlanmagan (admin sozlashi kerak).",
                 },
             )
-        return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_signature"})
+        # Imzo mos kelmadi. Agar alohida webhook secret hali sozlanmagan bo'lsa,
+        # provayder muhandisiga aynan shu holatni tushuntiramiz — aks holda
+        # "invalid_signature" ni endpoint nosozligi deb tushunishi mumkin.
+        from core.services import payment_keys
+        detail = "Signature mismatch."
+        if not payment_keys.webhook_ready():
+            detail = (
+                "Webhook secret has not been provided to us yet, so the "
+                "signature cannot be verified. Please send the webhook "
+                "secret_key for this URL."
+            )
+        return JSONResponse(
+            status_code=401,
+            content={"ok": False, "error": "invalid_signature", "detail": detail},
+        )
 
     try:
-        return await process_webhook(payload or {})
+        result = await process_webhook(payload or {})
+        record_webhook(payload.get("external_id"), payload.get("state"), "ishlandi")
+        return result
     except Exception as e:
         # Ichki xatoda 500 qaytaramiz — provayder QAYTA yuboradi. Aks holda
         # to'lov "yo'qoladi" (mijoz to'ladi, lekin buyurtma to'lanmagan qoladi).

@@ -2098,6 +2098,42 @@ _PAY_FIELDS = {
 }
 
 
+_WEBHOOK_RESULT_LABELS = {
+    "ok": "✅ imzo to'g'ri",
+    "ishlandi": "✅ qabul qilindi",
+    "mismatch": "❌ imzo mos kelmadi",
+    "secret_not_set": "❌ secret sozlanmagan",
+    "no_signature": "❌ imzosiz keldi",
+    "GET tekshiruvi": "🔎 manzil tekshirildi",
+}
+
+
+def _webhook_log_line() -> str:
+    """Oxirgi webhook urinishlari — provayder ulaganini ko'rish uchun.
+
+    Sozlash paytida eng kerakli ma'lumot: webhook UMUMAN kelyaptimi? Agar
+    kelmasa — provayder hali ulamagan. Kelsa, lekin imzo mos kelmasa — secret
+    kerak. Bu ikki holatning yechimi butunlay boshqa.
+    """
+    from core.services.payment_service import webhook_log
+
+    rows = webhook_log()
+    if not rows:
+        return (
+            "📥 Webhook: <i>hali birorta so'rov kelmagan</i> — provayder manzilni "
+            "ulaganini tekshiring"
+        )
+
+    lines = [f"📥 <b>Oxirgi webhook so'rovlari</b> ({len(rows)} ta):"]
+    for r in rows[:5]:
+        when = r["at"].strftime("%d.%m %H:%M")
+        label = _WEBHOOK_RESULT_LABELS.get(r["result"], esc(str(r["result"])))
+        state = r["state"]
+        state_txt = f" state={esc(state)}" if state not in ("—", "None") else ""
+        lines.append(f"• {when} — {label}{state_txt}")
+    return "\n".join(lines)
+
+
 def _db_status_line() -> str:
     """Bazadan kalit o'qish holati — HAR DOIM ko'rsatiladi.
 
@@ -2163,6 +2199,7 @@ async def _payments_text() -> str:
         f"{_src('webhook_secret')}"
         f"{'' if hook_ready else ' <i>(API_SECRET bilan tekshiriladi)</i>'}",
         _db_status_line(),
+        _webhook_log_line(),
         "",
         "📡 <b>Webhook manzili</b> — WLCM kabinetiga shuni bering:",
     ]
