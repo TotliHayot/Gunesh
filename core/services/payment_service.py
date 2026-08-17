@@ -50,6 +50,13 @@ from core.services import payment_keys, paylov
 
 logger = logging.getLogger(__name__)
 
+
+def esc_text(value) -> str:
+    """HTML parse_mode uchun xavfsiz matn (provayder javobida `<` bo'lishi mumkin)."""
+    from html import escape
+    return escape(str(value if value is not None else ""), quote=False)
+
+
 # WLCM holat kodlari (docs.wlcm.uz → States).
 #   1  STATE_PENDING   — to'lov kutilmoqda (e'tiborsiz qoldiriladi)
 #   2  STATE_SUCCESS   — muvaffaqiyatli
@@ -737,13 +744,24 @@ async def _try_fiscalization(session: AsyncSession, payment: Payment, order: Ord
             "🧾 Soliq cheki xatosi payment=%s: %s", payment.external_id, e
         )
         # Chek — huquqiy hujjat, shuning uchun jim o'tmaymiz: admin bilishi kerak.
+        # Xato matni TO'LIQ ko'rsatiladi (Telegram cheklovi doirasida) — aynan
+        # shu matnda provayder qaysi maydon yaroqsiz ekanini aytadi.
+        sent_items = ", ".join(
+            f"{i['title']}: {i['price']}×{i['count']}" for i in items[:5]
+        )
         await _notify_admins(
             "🧾 <b>Soliq chekini yaratib bo'lmadi</b>\n\n"
             f"🧾 Buyurtma: <b>#{order.order_number}</b>\n"
             f"🧾 payment_id: <code>{payment.payment_id}</code>\n"
-            f"❗️ Xato: <code>{str(e)[:200]}</code>\n\n"
-            "To'lov muvaffaqiyatli — faqat chek yaratilmadi. Kerak bo'lsa "
-            "provayder kabinetidan qo'lda chek chiqarish mumkin."
+            f"📦 Yuborilgan: <code>{esc_text(sent_items)[:300]}</code>\n"
+            f"🏷 MXIK: <code>{PAYLOV_FISCAL_MXIK or '—'}</code> · "
+            f"Qadoq: <code>{PAYLOV_FISCAL_PACKAGE_CODE or '—'}</code> · "
+            f"QQS: <code>{PAYLOV_FISCAL_VAT_PERCENT}%</code> · "
+            f"Birlik: <code>{PAYLOV_FISCAL_PRICE_UNIT}</code>\n\n"
+            f"❗️ <b>Xato:</b>\n<code>{esc_text(str(e))[:2000]}</code>\n\n"
+            "ℹ️ To'lov muvaffaqiyatli — faqat chek yaratilmadi.\n"
+            "Sozlamalarni to'g'rilagach Admin botda qayta urinib ko'rish mumkin:\n"
+            f"<code>/chek #{order.order_number}</code>"
         )
         return
 
@@ -768,6 +786,33 @@ async def _try_fiscalization(session: AsyncSession, payment: Payment, order: Ord
 # ─────────────────────────────────────────────────────────────
 #  QIDIRISH (admin qo'lda tasdiqlash uchun)
 # ─────────────────────────────────────────────────────────────
+async def retry_fiscalization(session: AsyncSession, payment: Payment) -> tuple[bool, str]:
+    """
+    Soliq chekini QAYTA yaratishga urinadi (sozlamalar to'g'rilangandan keyin).
+
+    Chek yaratilmasa `fiscal_done` belgilanmaydi, shuning uchun qayta urinish
+    xavfsiz. Qaytaradi: (muvaffaqiyat, sabab_matni).
+    """
+    if not PAYLOV_FISCAL_ENABLED:
+        return False, "Soliq cheki o'chirilgan (PAYLOV_FISCAL_ENABLED=false)."
+    if payment.status != "paid":
+        return False, f"To'lov holati «{payment.status}» — chek faqat to'langan buyurtma uchun."
+    if payment.fiscal_done:
+        return False, "Bu buyurtma uchun chek allaqachon yaratilgan."
+    if not payment.payment_id:
+        return False, "payment_id yo'q — provayder to'lov identifikatorini bermagan."
+
+    order = await session.get(Order, payment.order_id)
+    if order is None:
+        return False, "Buyurtma topilmadi."
+
+    await _try_fiscalization(session, payment, order)
+    await session.refresh(payment)
+    if payment.fiscal_done:
+        return True, "Chek yaratildi va mijozga yuborildi."
+    return False, "Chek yaratilmadi — sabab alohida xabarda ko'rsatildi."
+
+
 async def find_payment(session: AsyncSession, ref: str) -> Payment | None:
     """`external_id`, `payment_id` yoki `#buyurtma_raqami` bo'yicha topadi.
 

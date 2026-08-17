@@ -121,8 +121,15 @@ async def _request(method: str, path: str, payload: dict | None = None) -> dict:
         raise PaylovError(f"Ulanish xatosi: {e}") from e
 
     if resp.status_code >= 400:
-        logger.error("❌ To'lov API %s %s → %s: %s", method, path, resp.status_code, resp.text[:400])
-        err = PaylovError(f"To'lov API {resp.status_code}: {resp.text[:200]}{_hint(resp.status_code)}")
+        # Javob TO'LIQ loglanadi: provayder xatoning sababini shu matnda
+        # qaytaradi (masalan qaysi maydon validatsiyadan o'tmagani). Qisqartirish
+        # aynan kerakli qismni yashirib qo'yadi.
+        logger.error(
+            "❌ To'lov API %s %s → %s: %s", method, path, resp.status_code, resp.text
+        )
+        err = PaylovError(
+            f"To'lov API {resp.status_code}: {resp.text[:1500]}{_hint(resp.status_code)}"
+        )
         err.status_code = resp.status_code
         raise err
 
